@@ -139,10 +139,10 @@ async fn dispatch(
 
     let req = Request::new(hyper_req, path_match, Arc::clone(&shared.state));
 
-    // Fast path: no middleware — call handler directly, avoid chain setup.
-    if shared.middleware.is_empty() {
-        let handler = &shared.route_table.get(route_idx).expect("valid route index").handler;
-        let resp = (handler)(req).await;
+    // Fast path: no middleware at all — call handler directly, avoid chain setup.
+    let route = shared.route_table.get(route_idx).expect("valid route index");
+    if shared.middleware.is_empty() && route.middleware.is_empty() {
+        let resp = (route.handler)(req).await;
         return resp.into_inner();
     }
 
@@ -152,9 +152,9 @@ async fn dispatch(
 
 /// Recursively build and execute the middleware chain.
 ///
-/// At `mw_idx == shared.middleware.len()`, we've passed through all middleware
-/// and call the matched route handler. Otherwise, we call `middleware[mw_idx]`
-/// with a `Next` that recurses into `mw_idx + 1`.
+/// Uses a combined index over global middleware (0..global_len) and then
+/// route-level middleware (global_len..global_len + route_mw_len). After
+/// both are exhausted, calls the handler.
 ///
 /// Each recursion captures a fresh `Arc` clone — one `Arc::clone` per middleware
 /// layer per request. This is the only per-request allocation in the chain
@@ -166,17 +166,28 @@ fn run_middleware_chain(
     mw_idx: usize,
     req: Request,
 ) -> Pin<Box<dyn Future<Output = Response> + Send>> {
-    if mw_idx >= shared.middleware.len() {
+    let global_len = shared.middleware.len();
+    let route = shared.route_table.get(route_idx).expect("valid route index");
+    let total = global_len + route.middleware.len();
+
+    if mw_idx >= total {
         // End of chain — call the handler.
-        let handler = &shared.route_table.get(route_idx).expect("valid route index").handler;
-        (handler)(req)
-    } else {
-        // Call current middleware, giving it a Next that continues the chain.
+        (route.handler)(req)
+    } else if mw_idx < global_len {
+        // Global middleware.
         let shared_for_next = Arc::clone(&shared);
         let next = Next::new(move |req| {
             run_middleware_chain(shared_for_next, route_idx, mw_idx + 1, req)
         });
         shared.middleware[mw_idx].call(req, next)
+    } else {
+        // Route-level middleware (from groups).
+        let route_mw_idx = mw_idx - global_len;
+        let shared_for_next = Arc::clone(&shared);
+        let next = Next::new(move |req| {
+            run_middleware_chain(shared_for_next, route_idx, mw_idx + 1, req)
+        });
+        route.middleware[route_mw_idx].call(req, next)
     }
 }
 
@@ -198,6 +209,11 @@ fn print_route_table(table: &RouteTable) {
         } else {
             format!("  tags: {}", route.metadata.tags.join(", "))
         };
-        tracing::info!("  {method} {pattern}{name}{tags}");
+        let mw = if route.middleware.is_empty() {
+            String::new()
+        } else {
+            format!("  ({}mw)", route.middleware.len())
+        };
+        tracing::info!("  {method} {pattern}{name}{tags}{mw}");
     }
 }

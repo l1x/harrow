@@ -238,3 +238,157 @@ async fn middleware_and_state_together() {
     assert_eq!(body, "hits: 1");
     assert_eq!(header_val(&headers, "x-wrap"), Some("true"));
 }
+
+// -- Route Group Tests -------------------------------------------------------
+
+/// Middleware that adds x-group: <value> header.
+async fn group_tag_middleware(req: Request, next: Next) -> Response {
+    let resp = next.run(req).await;
+    resp.header("x-group", "api")
+}
+
+/// Another middleware to verify ordering.
+async fn inner_tag_middleware(req: Request, next: Next) -> Response {
+    let resp = next.run(req).await;
+    resp.header("x-inner", "v1")
+}
+
+async fn users_handler(_req: Request) -> Response {
+    Response::text("users list")
+}
+
+async fn user_by_id(req: Request) -> Response {
+    let id = req.param("id");
+    Response::text(format!("user {id}"))
+}
+
+#[tokio::test]
+async fn group_basic_prefix() {
+    let app = App::new()
+        .get("/health", hello)
+        .group("/api", |g| {
+            g.get("/users", users_handler)
+             .get("/users/:id", user_by_id)
+        });
+
+    let addr = start_server(app).await;
+
+    // /health still works at top level.
+    let (status, _, body) = http_get(addr, "/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello");
+
+    // /api/users works with group prefix.
+    let (status, _, body) = http_get(addr, "/api/users").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "users list");
+
+    // /api/users/:id with path param.
+    let (status, _, body) = http_get(addr, "/api/users/42").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "user 42");
+
+    // /users without prefix should 404.
+    let (status, _, _) = http_get(addr, "/users").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn group_scoped_middleware() {
+    let app = App::new()
+        .get("/health", hello)
+        .group("/api", |g| {
+            g.middleware(group_tag_middleware)
+             .get("/users", users_handler)
+        });
+
+    let addr = start_server(app).await;
+
+    // /health should NOT have the group middleware header.
+    let (status, headers, _) = http_get(addr, "/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(header_val(&headers, "x-group"), None);
+
+    // /api/users SHOULD have the group middleware header.
+    let (status, headers, body) = http_get(addr, "/api/users").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "users list");
+    assert_eq!(header_val(&headers, "x-group"), Some("api"));
+}
+
+#[tokio::test]
+async fn group_with_global_middleware() {
+    // Global middleware + group middleware. Both should run on group routes,
+    // only global on non-group routes.
+    let app = App::new()
+        .middleware(wrap_middleware)
+        .get("/health", hello)
+        .group("/api", |g| {
+            g.middleware(group_tag_middleware)
+             .get("/users", users_handler)
+        });
+
+    let addr = start_server(app).await;
+
+    // /health: global middleware only.
+    let (status, headers, _) = http_get(addr, "/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(header_val(&headers, "x-wrap"), Some("true"));
+    assert_eq!(header_val(&headers, "x-group"), None);
+
+    // /api/users: global + group middleware.
+    let (status, headers, body) = http_get(addr, "/api/users").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "users list");
+    assert_eq!(header_val(&headers, "x-wrap"), Some("true"));
+    assert_eq!(header_val(&headers, "x-group"), Some("api"));
+}
+
+#[tokio::test]
+async fn nested_groups() {
+    // /api -> group_tag_middleware
+    //   /v1 -> inner_tag_middleware
+    //     /users -> should have both middlewares
+    let app = App::new()
+        .group("/api", |g| {
+            g.middleware(group_tag_middleware)
+             .get("/health", hello)
+             .group("/v1", |v1| {
+                 v1.middleware(inner_tag_middleware)
+                   .get("/users", users_handler)
+             })
+        });
+
+    let addr = start_server(app).await;
+
+    // /api/health: only outer group middleware.
+    let (status, headers, _) = http_get(addr, "/api/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(header_val(&headers, "x-group"), Some("api"));
+    assert_eq!(header_val(&headers, "x-inner"), None);
+
+    // /api/v1/users: outer + inner group middleware.
+    let (status, headers, body) = http_get(addr, "/api/v1/users").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "users list");
+    assert_eq!(header_val(&headers, "x-group"), Some("api"));
+    assert_eq!(header_val(&headers, "x-inner"), Some("v1"));
+}
+
+#[tokio::test]
+async fn group_404_and_405() {
+    let app = App::new()
+        .group("/api", |g| {
+            g.post("/submit", hello)
+        });
+
+    let addr = start_server(app).await;
+
+    // Path doesn't exist at all -> 404.
+    let (status, _, _) = http_get(addr, "/api/nope").await;
+    assert_eq!(status, 404);
+
+    // Path exists but wrong method -> 405.
+    let (status, _, _) = http_get(addr, "/api/submit").await;
+    assert_eq!(status, 405);
+}

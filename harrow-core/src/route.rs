@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use http::Method;
 
@@ -24,6 +25,10 @@ pub struct Route {
     pub pattern: PathPattern,
     pub handler: HandlerFn,
     pub metadata: RouteMetadata,
+    /// Middleware scoped to this route (from route groups).
+    /// Runs after global middleware, before the handler.
+    /// Stored as `Arc` so group middleware can be shared across routes cheaply.
+    pub middleware: Vec<Arc<dyn Middleware>>,
 }
 
 /// The route table. A `Vec` you can iterate, filter, print, serialize.
@@ -126,7 +131,7 @@ impl App {
         }
     }
 
-    /// Register a route.
+    /// Register a route (no route-level middleware).
     fn route<F, Fut>(mut self, method: Method, pattern: &str, handler: F) -> Self
     where
         F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -137,6 +142,7 @@ impl App {
             pattern: PathPattern::parse(pattern),
             handler: handler::wrap(handler),
             metadata: RouteMetadata::default(),
+            middleware: Vec::new(), // no route-level middleware for top-level routes
         });
         self
     }
@@ -195,7 +201,7 @@ impl App {
         self
     }
 
-    /// Add a middleware to the chain.
+    /// Add a global middleware. Runs on every request before route-level middleware.
     pub fn middleware<M: Middleware + 'static>(mut self, m: M) -> Self {
         self.middleware.push(Box::new(m));
         self
@@ -204,6 +210,30 @@ impl App {
     /// Register application state of type `T`.
     pub fn state<T: Send + Sync + 'static>(mut self, val: T) -> Self {
         self.state.insert(val);
+        self
+    }
+
+    /// Create a route group with a shared prefix and optional scoped middleware.
+    ///
+    /// Routes defined inside the group get the prefix prepended and any
+    /// middleware added to the group attached. Group middleware runs after
+    /// global middleware but before the handler.
+    ///
+    /// ```ignore
+    /// let app = App::new()
+    ///     .get("/health", health)
+    ///     .group("/api/v1", |g| {
+    ///         g.middleware(auth_middleware)
+    ///          .get("/users", list_users)
+    ///          .get("/users/:id", get_user)
+    ///     });
+    /// ```
+    pub fn group(mut self, prefix: &str, f: impl FnOnce(Group) -> Group) -> Self {
+        let g = Group::new(prefix);
+        let g = f(g);
+        for route in g.into_routes() {
+            self.route_table.push(route);
+        }
         self
     }
 
@@ -229,3 +259,138 @@ impl Default for App {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Route Group
+// ---------------------------------------------------------------------------
+
+/// A group of routes sharing a common path prefix and scoped middleware.
+///
+/// Created via `App::group()` or `Group::group()` for nesting.
+pub struct Group {
+    prefix: String,
+    middleware: Vec<Arc<dyn Middleware>>,
+    routes: Vec<Route>,
+}
+
+impl Group {
+    fn new(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.trim_end_matches('/').to_string(),
+            middleware: Vec::new(),
+            routes: Vec::new(),
+        }
+    }
+
+    /// Add middleware scoped to this group. Runs after global middleware,
+    /// before the handler, only for routes in this group.
+    pub fn middleware<M: Middleware + 'static>(mut self, m: M) -> Self {
+        self.middleware.push(Arc::new(m));
+        self
+    }
+
+    /// Register a route within this group. The group prefix is prepended.
+    /// Group middleware is attached later in `into_routes()`.
+    fn route<F, Fut>(mut self, method: Method, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        let full_pattern = format!("{}{}", self.prefix, pattern);
+        self.routes.push(Route {
+            method,
+            pattern: PathPattern::parse(&full_pattern),
+            handler: handler::wrap(handler),
+            metadata: RouteMetadata::default(),
+            middleware: Vec::new(),
+        });
+        self
+    }
+
+    pub fn get<F, Fut>(self, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        self.route(Method::GET, pattern, handler)
+    }
+
+    pub fn post<F, Fut>(self, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        self.route(Method::POST, pattern, handler)
+    }
+
+    pub fn put<F, Fut>(self, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        self.route(Method::PUT, pattern, handler)
+    }
+
+    pub fn delete<F, Fut>(self, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        self.route(Method::DELETE, pattern, handler)
+    }
+
+    pub fn patch<F, Fut>(self, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        self.route(Method::PATCH, pattern, handler)
+    }
+
+    /// Nest a sub-group. The sub-group's prefix is appended to this group's
+    /// prefix, and middleware from both groups is combined (outer group first).
+    ///
+    /// ```ignore
+    /// app.group("/api", |g| {
+    ///     g.middleware(auth)
+    ///      .group("/v1", |v1| {
+    ///          v1.middleware(rate_limit)
+    ///            .get("/users", list_users)  // /api/v1/users — auth + rate_limit
+    ///      })
+    ///      .get("/health", health)           // /api/health — auth only
+    /// })
+    /// ```
+    pub fn group(mut self, prefix: &str, f: impl FnOnce(Group) -> Group) -> Self {
+        let nested_prefix = format!("{}{}", self.prefix, prefix.trim_end_matches('/'));
+        let sub = Group::new(&nested_prefix);
+        let sub = f(sub);
+        for mut route in sub.into_routes() {
+            // Prepend this group's middleware before the sub-group's middleware.
+            let mut combined: Vec<Arc<dyn Middleware>> = Vec::new();
+            for mw in &self.middleware {
+                combined.push(Arc::clone(mw));
+            }
+            combined.append(&mut route.middleware);
+            route.middleware = combined;
+            self.routes.push(route);
+        }
+        self
+    }
+
+    /// Consume the group, attaching group middleware to each route.
+    fn into_routes(self) -> Vec<Route> {
+        let mut routes = self.routes;
+        for route in &mut routes {
+            // Prepend group middleware before any existing per-route middleware
+            // (which may come from nested sub-groups).
+            let mut combined: Vec<Arc<dyn Middleware>> = Vec::new();
+            for mw in &self.middleware {
+                combined.push(Arc::clone(mw));
+            }
+            combined.append(&mut route.middleware);
+            route.middleware = combined;
+        }
+        routes
+    }
+}
+

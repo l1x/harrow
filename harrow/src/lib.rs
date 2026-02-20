@@ -7,7 +7,7 @@ pub use harrow_core::middleware::{Middleware, Next};
 pub use harrow_core::path::PathPattern;
 pub use harrow_core::request::{BodyError, Request};
 pub use harrow_core::response::{IntoResponse, Response};
-pub use harrow_core::route::{App, Route, RouteMetadata, RouteTable};
+pub use harrow_core::route::{App, Group, Route, RouteMetadata, RouteTable};
 pub use harrow_core::state::TypeMap;
 
 pub use harrow_server::{serve, serve_with_shutdown};
