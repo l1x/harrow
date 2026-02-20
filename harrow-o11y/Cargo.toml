@@ -1,0 +1,16 @@
+[package]
+name = "harrow-o11y"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Observability layer for Harrow: tracing spans, metrics, request IDs"
+
+[features]
+default = []
+profiling = []
+
+[dependencies]
+harrow-core = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+tracing = { workspace = true }

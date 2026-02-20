@@ -1,0 +1,20 @@
+[package]
+name = "harrow-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types for Harrow: routing, request/response wrappers, middleware"
+
+[features]
+default = ["json"]
+json = ["serde", "serde_json"]
+profiling = []
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+pin-project-lite = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

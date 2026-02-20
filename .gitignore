@@ -1,0 +1,8 @@
+/target
+flamegraphs/*.svg
+flamegraphs/*.folded
+flamegraphs/manifest.json
+*.perf.data
+*.perf.data.old
+perf.data
+perf.data.old

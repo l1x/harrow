@@ -1,0 +1,32 @@
+[package]
+name = "harrow-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hyper server binding for Harrow: connection handling, graceful shutdown"
+
+[features]
+default = ["http2"]
+http2 = []
+tls = ["hyper-rustls", "rustls"]
+profiling = []
+
+[dependencies]
+harrow-core = { workspace = true }
+harrow-o11y = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# Optional TLS
+hyper-rustls = { version = "0.27", optional = true }
+rustls = { version = "0.23", optional = true }
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["client"] }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
