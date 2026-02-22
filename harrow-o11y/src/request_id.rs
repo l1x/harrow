@@ -1,12 +1,10 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a unique request ID.
-/// Uses a monotonic counter combined with a process-unique prefix.
-/// Not globally unique across processes — use UUIDs if you need that.
+/// Generate a random request ID.
+/// Uses OS randomness via `getrandom` for unpredictable, non-sequential IDs.
+/// Format: `hrw-` followed by 16 lowercase hex digits (64 bits of entropy).
 pub fn generate() -> String {
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).expect("getrandom failed");
+    let id = u64::from_ne_bytes(buf);
     format!("hrw-{id:016x}")
 }
 
@@ -20,5 +18,12 @@ mod tests {
         let b = generate();
         assert_ne!(a, b);
         assert!(a.starts_with("hrw-"));
+    }
+
+    #[test]
+    fn correct_length() {
+        let id = generate();
+        // "hrw-" (4) + 16 hex digits = 20 chars
+        assert_eq!(id.len(), 20);
     }
 }

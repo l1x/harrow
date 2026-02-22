@@ -472,6 +472,7 @@ dependencies = [
 name = "harrow-o11y"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "harrow-core",
  "metrics",
  "metrics-exporter-prometheus",
