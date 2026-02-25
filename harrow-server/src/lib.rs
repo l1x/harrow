@@ -138,7 +138,7 @@ async fn dispatch(
     };
 
     let route = shared.route_table.get(route_idx).expect("valid route index");
-    let route_pattern = Some(route.pattern.as_str().to_string());
+    let route_pattern = Some(route.pattern.as_arc_str());
     let req = Request::new(hyper_req, path_match, Arc::clone(&shared.state), route_pattern);
 
     // Fast path: no middleware at all — call handler directly, avoid chain setup.

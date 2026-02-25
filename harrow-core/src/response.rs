@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use http::StatusCode;
 use http_body_util::Full;
 
@@ -27,17 +27,24 @@ impl Response {
     pub fn text(body: impl Into<String>) -> Self {
         let body: String = body.into();
         let mut resp = Self::new(StatusCode::OK, body);
-        resp.set_header("content-type", "text/plain; charset=utf-8");
+        resp.set_header_static(
+            http::header::CONTENT_TYPE,
+            http::header::HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
         resp
     }
 
     /// 200 OK with a JSON body.
     #[cfg(feature = "json")]
     pub fn json(value: &impl serde::Serialize) -> Self {
-        match serde_json::to_vec(value) {
-            Ok(bytes) => {
-                let mut resp = Self::new(StatusCode::OK, bytes);
-                resp.set_header("content-type", "application/json");
+        let mut buf = BytesMut::with_capacity(128);
+        match serde_json::to_writer((&mut buf).writer(), value) {
+            Ok(()) => {
+                let mut resp = Self::new(StatusCode::OK, buf.freeze());
+                resp.set_header_static(
+                    http::header::CONTENT_TYPE,
+                    http::header::HeaderValue::from_static("application/json"),
+                );
                 resp
             }
             Err(_) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "serialization error"),
@@ -63,6 +70,14 @@ impl Response {
         ) {
             self.inner.headers_mut().insert(name, value);
         }
+    }
+
+    fn set_header_static(
+        &mut self,
+        name: http::header::HeaderName,
+        value: http::header::HeaderValue,
+    ) {
+        self.inner.headers_mut().insert(name, value);
     }
 
     /// The HTTP status code.

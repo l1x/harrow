@@ -1,9 +1,10 @@
 use std::fmt;
+use std::sync::Arc;
 
 /// A parsed path pattern such as `/users/:id` or `/files/*path`.
 #[derive(Clone)]
 pub struct PathPattern {
-    raw: String,
+    raw: Arc<str>,
     segments: Vec<Segment>,
 }
 
@@ -42,7 +43,7 @@ impl PathMatch {
 impl PathPattern {
     /// Parse a pattern string like `/users/:id` or `/files/*path`.
     pub fn parse(pattern: &str) -> Self {
-        let raw = pattern.to_string();
+        let raw: Arc<str> = pattern.into();
         let segments = pattern
             .trim_start_matches('/')
             .split('/')
@@ -130,6 +131,11 @@ impl PathPattern {
     /// The raw pattern string as provided.
     pub fn as_str(&self) -> &str {
         &self.raw
+    }
+
+    /// Return a cheap `Arc<str>` clone of the raw pattern.
+    pub fn as_arc_str(&self) -> Arc<str> {
+        Arc::clone(&self.raw)
     }
 }
 

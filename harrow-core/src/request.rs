@@ -14,7 +14,7 @@ pub struct Request {
     inner: http::Request<Incoming>,
     path_match: PathMatch,
     state: Arc<TypeMap>,
-    route_pattern: Option<String>,
+    route_pattern: Option<Arc<str>>,
     request_id: Option<String>,
 }
 
@@ -23,7 +23,7 @@ impl Request {
         inner: http::Request<Incoming>,
         path_match: PathMatch,
         state: Arc<TypeMap>,
-        route_pattern: Option<String>,
+        route_pattern: Option<Arc<str>>,
     ) -> Self {
         Self {
             inner,
