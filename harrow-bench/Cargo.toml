@@ -8,6 +8,7 @@ description = "Benchmarks and load driver for Harrow"
 [dependencies]
 harrow = { path = "../harrow" }
 harrow-core = { workspace = true }
+axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +16,14 @@ http = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bin]]
+name = "harrow-server"
+path = "src/bin/harrow_server.rs"
+
+[[bin]]
+name = "axum-server"
+path = "src/bin/axum_server.rs"
 
 [[bench]]
 name = "echo"
@@ -30,4 +39,8 @@ harness = false
 
 [[bench]]
 name = "route_groups"
+harness = false
+
+[[bench]]
+name = "axum_echo"
 harness = false

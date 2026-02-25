@@ -302,6 +302,74 @@ Flamegraph diffs are generated alongside criterion reports. See [`docs/prds/harr
 
 ---
 
+## Framework Comparison: Harrow vs Axum
+
+In addition to internal micro-benchmarks, Harrow includes an external load-test comparison against [Axum](https://github.com/tokio-rs/axum) using the `mcp-load-tester` bench binary.
+
+### What it measures
+
+Both frameworks serve identical endpoints with no middleware:
+
+| Endpoint | Response |
+|----------|----------|
+| `GET /` | `"hello, world"` (text) |
+| `GET /greet/:name` | `"hello, bench"` (text with path param) |
+| `GET /health` | `{"status":"ok"}` (JSON) |
+
+Each combination is tested at concurrency levels 1, 4, 8, and 16 with 10-second runs and 3-second warmup.
+
+### How to run
+
+**Criterion micro-benchmarks** (same BenchClient, TCP round-trip):
+
+```bash
+# Harrow echo benchmarks
+cargo bench --bench echo
+
+# Axum echo benchmarks (same test patterns)
+cargo bench --bench axum_echo
+```
+
+**External load-test comparison** (requires `bench` binary from mcp-load-tester):
+
+```bash
+# Option 1: auto-discover bench binary
+./scripts/compare-frameworks.sh
+
+# Option 2: explicit path
+BENCH_BIN=/path/to/bench ./scripts/compare-frameworks.sh
+
+# Option 3: flag
+./scripts/compare-frameworks.sh --bench-bin /path/to/bench
+```
+
+Results are written to `target/comparison/`:
+- Per-test JSON files with HdrHistogram percentiles
+- `comparison-report.md` — markdown summary table
+
+### Fairness principles
+
+- Same Tokio runtime, same allocator, same `--release` profile
+- Byte-identical response bodies where possible
+- Sequential testing (never both servers under load simultaneously)
+- Same warmup period, duration, and concurrency levels
+- Same `BenchClient` for Criterion benchmarks
+
+### Server binaries
+
+The comparison uses two minimal server binaries in `harrow-bench`:
+
+```bash
+# Build both
+cargo build --release --bin harrow-server --bin axum-server
+
+# Run individually (default port 3000)
+target/release/harrow-server --port 3001
+target/release/axum-server --port 3002
+```
+
+---
+
 ## Future Optimization Targets
 
 | Target | Expected gain | Complexity |
