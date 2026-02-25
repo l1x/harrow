@@ -115,15 +115,15 @@ Full HTTP/1.1 request-response cycle over loopback TCP. Measures: TCP accept →
 
 | Benchmark | Time | Delta vs baseline |
 |-----------|------|-------------------|
-| `text_no_mw` (baseline) | 29.3 µs | — |
-| `json_no_mw` | 29.7 µs | +0.4 µs |
-| `param_no_mw` (`/users/:id`) | 29.3 µs | +0.0 µs |
-| `404_miss` | 29.2 µs | -0.1 µs |
+| `text_no_mw` (baseline) | 24.4 µs | — |
+| `json_no_mw` | 24.8 µs | +0.4 µs |
+| `param_no_mw` (`/users/:id`) | 25.1 µs | +0.7 µs |
+| `404_miss` | 24.1 µs | -0.3 µs |
 
 ### Analysis
 
-- **Loopback TCP dominates at ~29 µs.** This includes kernel TCP stack, hyper's HTTP/1.1 parser, and the response write path. Harrow's routing overhead is invisible at this scale.
-- **JSON serialization adds ~0.4 µs.** `serde_json::to_vec` for a small `{"status":"ok","code":200}` payload.
+- **Loopback TCP dominates at ~24 µs.** This includes kernel TCP stack, hyper's HTTP/1.1 parser, and the response write path. Harrow's routing overhead is invisible at this scale.
+- **JSON serialization adds ~0.4 µs.** `serde_json::to_writer` into `BytesMut(128)` for a small `{"status":"ok","code":200}` payload.
 - **Path param extraction is free in TCP terms.** The 80 ns `match_path` cost is lost in TCP noise.
 - **404 is no slower than 200.** The zero-alloc `matches()` path for 405 detection means even failed lookups have negligible framework cost.
 
@@ -370,11 +370,31 @@ target/release/axum-server --port 3002
 
 ---
 
+## Optimization History
+
+### Hot-path allocation elimination (2026-02-25)
+
+Closed the ~7% gap vs Axum on JSON responses (26.3 µs → 24.8 µs). Three changes:
+
+| Change | File(s) | What it eliminated |
+|--------|---------|-------------------|
+| `serde_json::to_writer` into `BytesMut(128)` | `response.rs` | Intermediate `Vec<u8>` allocation in `to_vec()` |
+| `set_header_static` with `HeaderValue::from_static` | `response.rs` | Per-request header name parsing + value validation |
+| `PathPattern.raw`: `String` → `Arc<str>` | `path.rs`, `request.rs`, `lib.rs` | Per-request `to_string()` heap allocation for route pattern |
+
+**Result:** Harrow JSON is now within noise of Axum (~24.8 µs vs ~24.7 µs).
+
+---
+
 ## Future Optimization Targets
 
-| Target | Expected gain | Complexity |
-|--------|---------------|------------|
-| Radix tree for route lookup | O(path_len) vs O(n_routes) — eliminates scaling wall at 200+ routes | Medium |
-| Inline `Next` (avoid `Box<dyn FnOnce>`) | -40 B per middleware per request | Medium (requires `Next` restructure) |
-| Borrowed param values (`&str` into request path) | Eliminates String alloc per param | High (lifetime propagation) |
-| `SmallVec<[u8; 64]>` for small response bodies | Avoid heap alloc for tiny responses | Low |
+| Target | Expected gain | Complexity | When to pursue |
+|--------|---------------|------------|----------------|
+| Radix tree for route lookup | O(path_len) vs O(n_routes) — ~800 ns at 100 routes | Medium | When exceeding ~100 routes |
+| Inline `Next` (avoid `Box<dyn FnOnce>`) | ~10 ns per middleware layer | Very high | Diminishing returns at current scale |
+| Borrowed param values (`&str` into request path) | ~40 ns per parameterized route | Very high (lifetime propagation) | Not recommended without major API refactor |
+| ~~`SmallVec<[u8; 64]>` for small response bodies~~ | ~~Avoid heap alloc for tiny responses~~ | ~~Low~~ | Superseded by `BytesMut` + `to_writer` approach |
+| ~~Zero-cost static headers~~ | ~~Skip header name/value parsing~~ | ~~Low~~ | Done (2026-02-25) |
+| ~~Eliminate route pattern `to_string()`~~ | ~~Skip per-request String alloc~~ | ~~Low~~ | Done (2026-02-25) |
+
+**Status:** Framework overhead is ~2 µs on a ~22 µs TCP baseline. At parity with Axum. Remaining optimizations offer sub-50 ns gains except for radix tree routing (relevant only at >100 routes). Diminishing returns reached for typical workloads.
