@@ -25,6 +25,14 @@ path = "src/bin/harrow_server.rs"
 name = "axum-server"
 path = "src/bin/axum_server.rs"
 
+[[bin]]
+name = "compare-frameworks"
+path = "src/bin/compare_frameworks.rs"
+
+[[bin]]
+name = "generate-histogram"
+path = "src/bin/generate_histogram.rs"
+
 [[bench]]
 name = "echo"
 harness = false
