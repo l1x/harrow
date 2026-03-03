@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Spot instance requests — server + client
+# ---------------------------------------------------------------------------
+
+resource "aws_spot_instance_request" "server" {
+  ami                    = local.ami
+  instance_type          = var.instance_type
+  key_name               = var.key_name
+  vpc_security_group_ids = [aws_security_group.bench.id]
+  availability_zone      = local.az
+  placement_group        = aws_placement_group.bench.name
+
+  spot_type            = "one-time"
+  wait_for_fulfillment = true
+
+  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
+    repo_url = var.repo_url
+    branch   = var.branch
+    role     = "server"
+  }))
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
+
+  tags = merge(local.common_tags, { Name = "harrow-bench-server" })
+}
+
+resource "aws_spot_instance_request" "client" {
+  ami                    = local.ami
+  instance_type          = var.instance_type
+  key_name               = var.key_name
+  vpc_security_group_ids = [aws_security_group.bench.id]
+  availability_zone      = local.az
+  placement_group        = aws_placement_group.bench.name
+
+  spot_type            = "one-time"
+  wait_for_fulfillment = true
+
+  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
+    repo_url = var.repo_url
+    branch   = var.branch
+    role     = "client"
+  }))
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
+
+  tags = merge(local.common_tags, { Name = "harrow-bench-client" })
+}

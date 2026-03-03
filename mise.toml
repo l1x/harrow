@@ -1,0 +1,14 @@
+experimental_monorepo_root = true
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+MISE_EXPERIMENTAL = true
+
+[settings]
+experimental = true
+
+[tools]
+rust = "1.91.1"
+python = "3.13.7"
+terraform = "latest"
+uv = "0.8.19"
