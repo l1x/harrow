@@ -13,7 +13,6 @@ profiling = []
 
 [dependencies]
 harrow-core = { workspace = true }
-harrow-o11y = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
@@ -28,6 +27,7 @@ rustls = { version = "0.23", optional = true }
 
 [dev-dependencies]
 harrow-core = { workspace = true, features = ["timeout"] }
+harrow-o11y = { workspace = true }
 hyper = { workspace = true, features = ["client"] }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }

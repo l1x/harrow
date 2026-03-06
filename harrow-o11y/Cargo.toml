@@ -10,8 +10,6 @@ default = []
 profiling = []
 
 [dependencies]
-getrandom = { workspace = true }
 harrow-core = { workspace = true }
-metrics = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
+ro11y = { workspace = true }
 tracing = { workspace = true }

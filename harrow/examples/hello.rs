@@ -18,14 +18,13 @@ async fn health(_req: Request) -> Response {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
-
     let addr = "127.0.0.1:3000".parse().unwrap();
 
     let app = App::new()
-        .o11y(O11yConfig::default())
+        .o11y(O11yConfig {
+            otlp_endpoint: option_env!("OTLP_ENDPOINT"),
+            ..O11yConfig::default()
+        })
         .middleware(timeout_middleware(Duration::from_secs(30)))
         .get("/", hello)
         .get("/greet/:name", greet)

@@ -1,0 +1,8 @@
+services:
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    ports:
+      # OTLP HTTP — ro11y exports traces here
+      - "4318:4318"
+      # Jaeger UI
+      - "16686:16686"

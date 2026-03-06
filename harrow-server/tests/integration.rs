@@ -467,22 +467,12 @@ async fn o11y_middleware_adds_request_id_header() {
     assert_eq!(status, 200);
     let rid = header_val(&headers, "x-request-id");
     assert!(rid.is_some(), "expected x-request-id header");
-    assert!(rid.unwrap().starts_with("hrw-"), "expected hrw- prefix");
-}
-
-#[tokio::test]
-async fn o11y_middleware_respects_disable_request_id() {
-    let config = O11yConfig::default().disable_request_id();
-    let app = App::new()
-        .state(Arc::new(config))
-        .middleware(o11y_middleware)
-        .get("/hello", hello);
-
-    let addr = start_server(app).await;
-
-    let (status, headers, _) = http_get(addr, "/hello").await;
-    assert_eq!(status, 200);
-    assert_eq!(header_val(&headers, "x-request-id"), None);
+    let rid = rid.unwrap();
+    assert_eq!(rid.len(), 32, "expected 32-char hex trace ID");
+    assert!(
+        rid.chars().all(|c| c.is_ascii_hexdigit()),
+        "expected hex characters only"
+    );
 }
 
 #[tokio::test]

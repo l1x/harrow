@@ -18,8 +18,7 @@ pub use harrow_core::timeout::timeout_middleware;
 #[cfg(feature = "o11y")]
 pub mod o11y {
     pub use harrow_o11y::o11y_middleware::o11y_middleware;
-    pub use harrow_o11y::request_id;
-    pub use harrow_o11y::{record_request, O11yConfig};
+    pub use harrow_o11y::O11yConfig;
 }
 
 #[cfg(feature = "o11y")]
@@ -31,15 +30,30 @@ mod o11y_ext {
 
     use crate::App;
 
-    /// Extension trait that wires `O11yConfig` into application state
-    /// and registers the o11y middleware in one call.
+    /// Extension trait that wires `O11yConfig` into application state,
+    /// initialises the ro11y telemetry subscriber, and registers the
+    /// o11y middleware in one call.
     pub trait AppO11yExt {
         fn o11y(self, config: O11yConfig) -> Self;
     }
 
+    /// Holds the ro11y `TelemetryGuard` so the OTLP exporter stays alive
+    /// for the lifetime of the application.
+    struct TelemetryGuardHolder(#[allow(dead_code)] ro11y::TelemetryGuard);
+
     impl AppO11yExt for App {
         fn o11y(self, config: O11yConfig) -> Self {
-            self.state(Arc::new(config)).middleware(o11y_middleware)
+            let guard = ro11y::init(ro11y::TelemetryConfig {
+                service_name: config.service_name,
+                service_version: config.service_version,
+                environment: config.environment,
+                otlp_endpoint: config.otlp_endpoint,
+                use_metrics_interval: None,
+            });
+
+            self.state(Arc::new(TelemetryGuardHolder(guard)))
+                .state(Arc::new(config))
+                .middleware(o11y_middleware)
         }
     }
 }
