@@ -610,6 +610,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "matchit",
+ "percent-encoding",
  "pin-project-lite",
  "serde",
  "serde_json",

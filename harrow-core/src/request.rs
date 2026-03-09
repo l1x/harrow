@@ -4,9 +4,21 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::Method;
 use hyper::body::Incoming;
+use percent_encoding::percent_decode_str;
 
 use crate::path::PathMatch;
 use crate::state::TypeMap;
+
+/// Maximum number of query pairs parsed to prevent OOM.
+const MAX_QUERY_PAIRS: usize = 100;
+
+/// Decode a query string component: `+` → space, then percent-decode.
+fn decode_query_component(s: &str) -> String {
+    let plus_decoded = s.replace('+', " ");
+    percent_decode_str(&plus_decoded)
+        .decode_utf8_lossy()
+        .into_owned()
+}
 
 /// Harrow's request wrapper. Provides ergonomic access to path params,
 /// query strings, body, and application state without extractor traits.
@@ -56,6 +68,9 @@ impl Request {
     }
 
     /// Parse query string into key-value pairs.
+    ///
+    /// Percent-decodes keys and values, treats `+` as space.
+    /// Capped at 100 pairs to prevent OOM from pathological inputs.
     pub fn query_pairs(&self) -> HashMap<String, String> {
         self.inner
             .uri()
@@ -63,13 +78,34 @@ impl Request {
             .unwrap_or("")
             .split('&')
             .filter(|s| !s.is_empty())
+            .take(MAX_QUERY_PAIRS)
             .filter_map(|pair| {
                 let mut parts = pair.splitn(2, '=');
-                let key = parts.next()?;
-                let val = parts.next().unwrap_or("");
-                Some((key.to_string(), val.to_string()))
+                let key = decode_query_component(parts.next()?);
+                let val = decode_query_component(parts.next().unwrap_or(""));
+                Some((key, val))
             })
             .collect()
+    }
+
+    /// Look up a single query parameter by name without allocating a HashMap.
+    ///
+    /// Percent-decodes keys and values, treats `+` as space.
+    /// Returns the first match.
+    pub fn query_param(&self, name: &str) -> Option<String> {
+        self.inner
+            .uri()
+            .query()?
+            .split('&')
+            .filter(|s| !s.is_empty())
+            .filter_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                let key = decode_query_component(parts.next()?);
+                let val = decode_query_component(parts.next().unwrap_or(""));
+                Some((key, val))
+            })
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 
     /// Get a request header value as a string.
@@ -320,6 +356,93 @@ mod tests {
         )
         .await;
         assert!(req.query_pairs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_pairs_percent_decodes() {
+        let req = test_util::make_request(
+            "GET",
+            "/search?q=hello%20world&tag=%E2%9C%93",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        let pairs = req.query_pairs();
+        assert_eq!(pairs.get("q").unwrap(), "hello world");
+        assert_eq!(pairs.get("tag").unwrap(), "\u{2713}"); // ✓
+    }
+
+    #[tokio::test]
+    async fn query_pairs_plus_as_space() {
+        let req = test_util::make_request(
+            "GET",
+            "/search?q=hello+world",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        let pairs = req.query_pairs();
+        assert_eq!(pairs.get("q").unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn query_param_finds_single_value() {
+        let req = test_util::make_request(
+            "GET",
+            "/search?q=rust&page=2",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(req.query_param("q"), Some("rust".to_string()));
+        assert_eq!(req.query_param("page"), Some("2".to_string()));
+        assert_eq!(req.query_param("missing"), None);
+    }
+
+    #[tokio::test]
+    async fn query_param_decodes() {
+        let req = test_util::make_request(
+            "GET",
+            "/search?name=hello%20world",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(req.query_param("name"), Some("hello world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn query_pairs_bounded() {
+        // Build a query string with 200 pairs — only first 100 should be kept.
+        let qs: String = (0..200)
+            .map(|i| format!("k{i}=v{i}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let uri = format!("/test?{qs}");
+        let req = test_util::make_request(
+            "GET",
+            &uri,
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        let pairs = req.query_pairs();
+        assert_eq!(pairs.len(), 100);
     }
 
     #[tokio::test]
