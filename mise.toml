@@ -12,3 +12,23 @@ rust = "1.91.1"
 python = "3.13.7"
 terraform = "latest"
 uv = "0.8.19"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.clippy]
+description = "Run clippy with warnings as errors"
+run = "cargo clippy --workspace -- -D warnings"
+
+[tasks.test]
+description = "Run all workspace tests"
+run = "cargo test --workspace"
+
+[tasks.lint]
+description = "Run fmt + clippy"
+depends = ["fmt", "clippy"]
+
+[tasks.ci]
+description = "Run full CI pipeline (fmt, clippy, test)"
+depends = ["fmt", "clippy", "test"]
