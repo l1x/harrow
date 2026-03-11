@@ -13,6 +13,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 http = { workspace = true }
+toml = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -33,6 +34,18 @@ path = "src/bin/compare_frameworks.rs"
 [[bin]]
 name = "generate-histogram"
 path = "src/bin/generate_histogram.rs"
+
+[[bin]]
+name = "update-baseline"
+path = "src/bin/update_baseline.rs"
+
+[[bin]]
+name = "render-baseline"
+path = "src/bin/render_baseline.rs"
+
+[[bin]]
+name = "measure-allocs"
+path = "src/bin/measure_allocs.rs"
 
 [[bench]]
 name = "echo"

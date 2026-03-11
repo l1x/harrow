@@ -1,0 +1,144 @@
+[metadata]
+version = "0.1.0"
+date = "2026-03-11"
+platform = "arm64-darwin"
+cpu = "Apple M-series"
+rust_version = "1.85.0"
+notes = "Post BoxBody refactor. Measured on AC power, no background load."
+
+[benchmarks.echo_404]
+criterion_path = "echo_tcp/404_miss"
+description = "404 miss, 0 middleware, TCP round-trip"
+mean_ns = 22495.944774065283
+median_ns = 22253.8164994856
+alloc_bytes = 165
+alloc_count = 3
+
+[benchmarks.echo_json]
+criterion_path = "echo_tcp/json_no_mw"
+description = "JSON echo, 0 middleware, TCP round-trip"
+mean_ns = 23211.576279644327
+median_ns = 23194.423737637677
+alloc_bytes = 2281
+alloc_count = 12
+
+[benchmarks.echo_param]
+criterion_path = "echo_tcp/param_no_mw"
+description = "Text echo with path param, 0 middleware, TCP"
+mean_ns = 23151.810396255893
+median_ns = 22883.434329018983
+alloc_bytes = 1543
+alloc_count = 10
+
+[benchmarks.echo_text]
+criterion_path = "echo_tcp/text_no_mw"
+description = "Text echo, 0 middleware, TCP round-trip"
+mean_ns = 22739.988180971737
+median_ns = 22694.45046620047
+alloc_bytes = 1487
+alloc_count = 7
+
+[benchmarks.full_health_3mw]
+criterion_path = "full_stack/text_3mw_health"
+description = "Text health + 3 middleware, TCP"
+mean_ns = 24421.27456112328
+median_ns = 24319.640564826703
+alloc_bytes = 3697
+alloc_count = 15
+
+[benchmarks.full_json_3mw]
+criterion_path = "full_stack/json_3mw_state_param"
+description = "JSON + 3 middleware + state + path param, TCP"
+mean_ns = 24317.47812886574
+median_ns = 24186.941882621948
+alloc_bytes = 4545
+alloc_count = 24
+
+[benchmarks.mw_depth_10]
+criterion_path = "middleware_depth/noop/10"
+description = "10 noop middleware layers, TCP"
+mean_ns = 24511.199820426576
+median_ns = 24382.56059257112
+alloc_bytes = 8767
+alloc_count = 27
+
+[benchmarks.path_match_1_param]
+criterion_path = "path_match/1_param"
+description = "Path match with 1 param: /users/:id"
+mean_ns = 66.76531201264574
+median_ns = 66.36741583254812
+alloc_bytes = 196
+alloc_count = 3
+
+[benchmarks.path_match_exact_hit]
+criterion_path = "path_match/exact_hit"
+description = "Exact path match: /health"
+mean_ns = 14.240175537708
+median_ns = 12.905623963313404
+alloc_bytes = 0
+alloc_count = 0
+
+[benchmarks.path_match_glob]
+criterion_path = "path_match/glob"
+description = "Glob path match: /files/*path"
+mean_ns = 130.93656933098111
+median_ns = 141.94283771423068
+alloc_bytes = 271
+alloc_count = 4
+
+[benchmarks.route_lookup_100]
+criterion_path = "route_table_lookup/worst_case/100"
+description = "Route table lookup, worst case, 100 routes"
+mean_ns = 85.27217296422668
+median_ns = 85.12678850883077
+alloc_bytes = 52
+alloc_count = 3
+
+[axum_benchmarks.echo_404]
+criterion_path = "axum_echo_tcp/404_miss"
+description = "404 miss, 0 middleware, TCP round-trip (Axum)"
+mean_ns = 24399.102103894675
+median_ns = 24192.36156089404
+alloc_bytes = 9030
+alloc_count = 12
+
+[axum_benchmarks.echo_json]
+criterion_path = "axum_echo_tcp/json_no_mw"
+description = "JSON echo, 0 middleware, TCP round-trip (Axum)"
+mean_ns = 24993.539798370966
+median_ns = 24921.195457559683
+alloc_bytes = 10238
+alloc_count = 23
+
+[axum_benchmarks.echo_param]
+criterion_path = "axum_echo_tcp/param_no_mw"
+description = "Text echo with path param, 0 middleware, TCP (Axum)"
+mean_ns = 24880.694328770387
+median_ns = 24888.080878341516
+alloc_bytes = 10143
+alloc_count = 21
+
+[axum_benchmarks.echo_text]
+criterion_path = "axum_echo_tcp/text_no_mw"
+description = "Text echo, 0 middleware, TCP round-trip (Axum)"
+mean_ns = 27456.93578618703
+median_ns = 26394.865257234487
+alloc_bytes = 9449
+alloc_count = 17
+
+[traffic_weights]
+echo_404 = 0.05
+echo_json = 0.15
+echo_param = 0.25
+echo_text = 0.1
+full_health_3mw = 0.1
+full_json_3mw = 0.3
+mw_depth_10 = 0.05
+
+[resource_budget]
+target_ops_per_sec = 10000
+cpu_budget_percent = 100.0
+memory_budget_mb = 50.0
+weighted_mean_ns = 23631.415983604435
+total_cpu_percent = 23.631415983604434
+verdict = "PASS"

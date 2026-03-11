@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1234" width="900" height="1234" font-family="system-ui,-apple-system,sans-serif">
+<rect width="900" height="1234" fill="#FFFFFF"/>
+<text x="30" y="30" font-size="18" font-weight="600" fill="#1F2937">Harrow Performance Baseline</text>
+<text x="30" y="48" font-size="11" fill="#6B7280">2026-03-11 | arm64-darwin | Apple M-series | Rust 1.85.0 | 0.1.0</text>
+<text x="30" y="76" font-size="14" font-weight="600" fill="#1F2937">Harrow Latency (all benchmarks)</text>
+<rect x="650" y="74" width="12" height="12" rx="2" fill="#6366F1"/>
+<text x="666" y="84" font-size="11" fill="#6B7280">Micro</text>
+<rect x="720" y="74" width="12" height="12" rx="2" fill="#3B82F6"/>
+<text x="736" y="84" font-size="11" fill="#6B7280">TCP</text>
+<text x="200" y="106.4" text-anchor="end" font-size="11" fill="#1F2937">glob match</text>
+<rect x="220" y="92.0" width="3.1" height="20" rx="3" fill="#6366F1" opacity="0.85"><title>Glob path match: /files/*path: 130.9 ns</title></rect>
+<text x="229.1" y="106.4" font-size="10" fill="#6B7280">130.9 ns</text>
+<text x="200" y="132.4" text-anchor="end" font-size="11" fill="#1F2937">route lookup (100)</text>
+<rect x="220" y="118.0" width="2.0" height="20" rx="3" fill="#6366F1" opacity="0.85"><title>Route table lookup, worst case, 100 routes: 85.3 ns</title></rect>
+<text x="228.0" y="132.4" font-size="10" fill="#6B7280">85.3 ns</text>
+<text x="200" y="158.4" text-anchor="end" font-size="11" fill="#1F2937">1 param match</text>
+<rect x="220" y="144.0" width="1.6" height="20" rx="3" fill="#6366F1" opacity="0.85"><title>Path match with 1 param: /users/:id: 66.8 ns</title></rect>
+<text x="227.6" y="158.4" font-size="10" fill="#6B7280">66.8 ns</text>
+<text x="200" y="184.4" text-anchor="end" font-size="11" fill="#1F2937">exact match</text>
+<rect x="220" y="170.0" width="0.3" height="20" rx="3" fill="#6366F1" opacity="0.85"><title>Exact path match: /health: 14.2 ns</title></rect>
+<text x="226.3" y="184.4" font-size="10" fill="#6B7280">14.2 ns</text>
+<text x="200" y="210.4" text-anchor="end" font-size="11" fill="#1F2937">10 middleware</text>
+<rect x="220" y="196.0" width="580.0" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>10 noop middleware layers, TCP: 24.51 µs</title></rect>
+<text x="806.0" y="210.4" font-size="10" fill="#6B7280">24.51 µs</text>
+<text x="200" y="236.4" text-anchor="end" font-size="11" fill="#1F2937">health + 3mw</text>
+<rect x="220" y="222.0" width="577.9" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>Text health + 3 middleware, TCP: 24.42 µs</title></rect>
+<text x="803.9" y="236.4" font-size="10" fill="#6B7280">24.42 µs</text>
+<text x="200" y="262.4" text-anchor="end" font-size="11" fill="#1F2937">json + 3mw + state</text>
+<rect x="220" y="248.0" width="575.4" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>JSON + 3 middleware + state + path param, TCP: 24.32 µs</title></rect>
+<text x="801.4" y="262.4" font-size="10" fill="#6B7280">24.32 µs</text>
+<text x="200" y="288.4" text-anchor="end" font-size="11" fill="#1F2937">json echo</text>
+<rect x="220" y="274.0" width="549.2" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>JSON echo, 0 middleware, TCP round-trip: 23.21 µs</title></rect>
+<text x="775.2" y="288.4" font-size="10" fill="#6B7280">23.21 µs</text>
+<text x="200" y="314.4" text-anchor="end" font-size="11" fill="#1F2937">param echo</text>
+<rect x="220" y="300.0" width="547.8" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>Text echo with path param, 0 middleware, TCP: 23.15 µs</title></rect>
+<text x="773.8" y="314.4" font-size="10" fill="#6B7280">23.15 µs</text>
+<text x="200" y="340.4" text-anchor="end" font-size="11" fill="#1F2937">text echo</text>
+<rect x="220" y="326.0" width="538.1" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>Text echo, 0 middleware, TCP round-trip: 22.74 µs</title></rect>
+<text x="764.1" y="340.4" font-size="10" fill="#6B7280">22.74 µs</text>
+<text x="200" y="366.4" text-anchor="end" font-size="11" fill="#1F2937">404 miss</text>
+<rect x="220" y="352.0" width="532.3" height="20" rx="3" fill="#3B82F6" opacity="0.85"><title>404 miss, 0 middleware, TCP round-trip: 22.50 µs</title></rect>
+<text x="758.3" y="366.4" font-size="10" fill="#6B7280">22.50 µs</text>
+<text x="30" y="434" font-size="14" font-weight="600" fill="#1F2937">Harrow vs Axum — TCP Latency</text>
+<rect x="650" y="432" width="12" height="12" rx="2" fill="#3B82F6"/>
+<text x="666" y="442" font-size="11" fill="#6B7280">Harrow</text>
+<rect x="730" y="432" width="12" height="12" rx="2" fill="#F97316"/>
+<text x="746" y="442" font-size="11" fill="#6B7280">Axum</text>
+<text x="200" y="464.4" text-anchor="end" font-size="11" fill="#1F2937">json echo</text>
+<rect x="220" y="450.0" width="490.3" height="20" rx="3" fill="#3B82F6" opacity="0.85"/>
+<text x="716.3" y="464.4" font-size="10" fill="#6B7280">23.21 µs</text>
+<rect x="220" y="470.0" width="528.0" height="20" rx="3" fill="#F97316" opacity="0.85"/>
+<text x="754.0" y="484.4" font-size="10" fill="#6B7280">24.99 µs</text>
+<text x="200" y="500.4" text-anchor="end" font-size="11" fill="#1F2937">param echo</text>
+<rect x="220" y="486.0" width="489.1" height="20" rx="3" fill="#3B82F6" opacity="0.85"/>
+<text x="715.1" y="500.4" font-size="10" fill="#6B7280">23.15 µs</text>
+<rect x="220" y="506.0" width="525.6" height="20" rx="3" fill="#F97316" opacity="0.85"/>
+<text x="751.6" y="520.4" font-size="10" fill="#6B7280">24.88 µs</text>
+<text x="200" y="536.4" text-anchor="end" font-size="11" fill="#1F2937">text echo</text>
+<rect x="220" y="522.0" width="480.4" height="20" rx="3" fill="#3B82F6" opacity="0.85"/>
+<text x="706.4" y="536.4" font-size="10" fill="#6B7280">22.74 µs</text>
+<rect x="220" y="542.0" width="580.0" height="20" rx="3" fill="#F97316" opacity="0.85"/>
+<text x="806.0" y="556.4" font-size="10" fill="#6B7280">27.46 µs</text>
+<text x="200" y="572.4" text-anchor="end" font-size="11" fill="#1F2937">404 miss</text>
+<rect x="220" y="558.0" width="475.2" height="20" rx="3" fill="#3B82F6" opacity="0.85"/>
+<text x="701.2" y="572.4" font-size="10" fill="#6B7280">22.50 µs</text>
+<rect x="220" y="578.0" width="515.4" height="20" rx="3" fill="#F97316" opacity="0.85"/>
+<text x="741.4" y="592.4" font-size="10" fill="#6B7280">24.40 µs</text>
+<text x="30" y="650" font-size="14" font-weight="600" fill="#1F2937">Allocation Profile — bytes per operation</text>
+<rect x="620" y="648" width="12" height="12" rx="2" fill="#8B5CF6"/>
+<text x="636" y="658" font-size="11" fill="#6B7280">Harrow</text>
+<rect x="700" y="648" width="12" height="12" rx="2" fill="#F59E0B"/>
+<text x="716" y="658" font-size="11" fill="#6B7280">Axum</text>
+<text x="200" y="680.4" text-anchor="end" font-size="11" fill="#1F2937">json echo</text>
+<rect x="220" y="666.0" width="129.2" height="20" rx="3" fill="#8B5CF6" opacity="0.8"/>
+<text x="355.2" y="680.4" font-size="10" fill="#6B7280">2.2 KB (12 allocs)</text>
+<rect x="220" y="686.0" width="580.0" height="20" rx="3" fill="#F59E0B" opacity="0.8"/>
+<text x="806.0" y="700.4" font-size="10" fill="#6B7280">10.0 KB (23 allocs)</text>
+<text x="200" y="716.4" text-anchor="end" font-size="11" fill="#1F2937">param echo</text>
+<rect x="220" y="702.0" width="87.4" height="20" rx="3" fill="#8B5CF6" opacity="0.8"/>
+<text x="313.4" y="716.4" font-size="10" fill="#6B7280">1.5 KB (10 allocs)</text>
+<rect x="220" y="722.0" width="574.6" height="20" rx="3" fill="#F59E0B" opacity="0.8"/>
+<text x="800.6" y="736.4" font-size="10" fill="#6B7280">9.9 KB (21 allocs)</text>
+<text x="200" y="752.4" text-anchor="end" font-size="11" fill="#1F2937">text echo</text>
+<rect x="220" y="738.0" width="84.2" height="20" rx="3" fill="#8B5CF6" opacity="0.8"/>
+<text x="310.2" y="752.4" font-size="10" fill="#6B7280">1.5 KB (7 allocs)</text>
+<rect x="220" y="758.0" width="535.3" height="20" rx="3" fill="#F59E0B" opacity="0.8"/>
+<text x="761.3" y="772.4" font-size="10" fill="#6B7280">9.2 KB (17 allocs)</text>
+<text x="200" y="788.4" text-anchor="end" font-size="11" fill="#1F2937">404 miss</text>
+<rect x="220" y="774.0" width="9.3" height="20" rx="3" fill="#8B5CF6" opacity="0.8"/>
+<text x="235.3" y="788.4" font-size="10" fill="#6B7280">165 B (3 allocs)</text>
+<rect x="220" y="794.0" width="511.6" height="20" rx="3" fill="#F59E0B" opacity="0.8"/>
+<text x="737.6" y="808.4" font-size="10" fill="#6B7280">8.8 KB (12 allocs)</text>
+<text x="30" y="866" font-size="14" font-weight="600" fill="#1F2937">Resource Budget</text>
+<rect x="30" y="880" width="840" height="100" rx="8" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="1"/>
+<text x="50" y="908" font-size="11" fill="#6B7280">Weighted Mean Latency</text>
+<text x="50" y="926" font-size="13" font-weight="500" fill="#1F2937">23.63 µs</text>
+<text x="280" y="908" font-size="11" fill="#6B7280">Max Single-Core Throughput</text>
+<text x="280" y="926" font-size="13" font-weight="500" fill="#1F2937">42317 req/s</text>
+<text x="530" y="908" font-size="11" fill="#6B7280">Verdict</text>
+<text x="530" y="928" font-size="16" font-weight="700" fill="#10B981">PASS</text>
+<text x="50" y="950" font-size="11" fill="#6B7280">Target Ops/s</text>
+<text x="50" y="968" font-size="13" font-weight="500" fill="#1F2937">10000</text>
+<text x="280" y="950" font-size="11" fill="#6B7280">CPU at Target</text>
+<text x="280" y="968" font-size="13" font-weight="500" fill="#1F2937">23.63%</text>
+<text x="530" y="950" font-size="11" fill="#6B7280">Memory Budget</text>
+<text x="530" y="968" font-size="13" font-weight="500" fill="#1F2937">50 MB</text>
+</svg>
