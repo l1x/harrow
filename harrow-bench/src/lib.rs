@@ -52,7 +52,7 @@ pub async fn json_handler(_req: Request) -> Response {
 /// Handler that reads a path param and state.
 pub async fn param_state_handler(req: Request) -> Response {
     let _id = req.param("id");
-    let counter = req.state::<Arc<HitCounter>>();
+    let counter = req.require_state::<Arc<HitCounter>>().unwrap();
     counter.0.fetch_add(1, Ordering::Relaxed);
     Response::json(&serde_json::json!({"id": _id, "status": "ok"}))
 }
@@ -191,6 +191,40 @@ pub async fn run_concurrent_mixed(
     }
 }
 
+/// Run N concurrent keep-alive connections with extra headers on each request.
+pub async fn run_concurrent_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+    concurrency: usize,
+    reqs_per_conn: usize,
+) {
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|&(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let mut handles = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let path = path.to_string();
+        let headers = headers.clone();
+        let handle = tokio::spawn(async move {
+            let mut client = BenchClient::connect(addr).await;
+            let h: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            for _ in 0..reqs_per_conn {
+                let (status, _) = client.get_with_headers(&path, &h).await;
+                debug_assert!(status == 200 || status == 204 || status == 404);
+            }
+        });
+        handles.push(handle);
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Keep-alive HTTP/1.1 client
 // ---------------------------------------------------------------------------
@@ -217,6 +251,58 @@ impl BenchClient {
         Self {
             stream,
             buf: Vec::with_capacity(4096),
+        }
+    }
+
+    /// Send a GET request with extra headers and return the status code and body length.
+    /// Uses keep-alive — the connection is reused across calls.
+    pub async fn get_with_headers(&mut self, path: &str, headers: &[(&str, &str)]) -> (u16, usize) {
+        let mut req =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n");
+        for &(name, value) in headers {
+            req.push_str(&format!("{name}: {value}\r\n"));
+        }
+        req.push_str("\r\n");
+        self.stream.write_all(req.as_bytes()).await.unwrap();
+
+        self.buf.clear();
+        let header_end = self.read_until_header_end().await;
+        let headers_str = std::str::from_utf8(&self.buf[..header_end]).unwrap();
+
+        let status = parse_status(headers_str);
+        let body_len = parse_body_length(headers_str, &self.buf[header_end..]).await;
+
+        if let BodyLength::ContentLength(cl) = body_len {
+            let already_read = self.buf.len() - header_end;
+            if already_read < cl {
+                let remaining = cl - already_read;
+                let old_len = self.buf.len();
+                self.buf.resize(old_len + remaining, 0);
+                self.stream
+                    .read_exact(&mut self.buf[old_len..])
+                    .await
+                    .unwrap();
+            }
+            (status, cl)
+        } else if let BodyLength::Chunked = body_len {
+            let body_start = header_end;
+            loop {
+                let tail = std::str::from_utf8(&self.buf[body_start..]).unwrap_or("");
+                if tail.contains("0\r\n\r\n") || tail.ends_with("0\r\n\r\n") {
+                    break;
+                }
+                let old_len = self.buf.len();
+                self.buf.resize(old_len + 1024, 0);
+                let n = self.stream.read(&mut self.buf[old_len..]).await.unwrap();
+                self.buf.truncate(old_len + n);
+                if n == 0 {
+                    break;
+                }
+            }
+            let body_bytes = decode_chunked_len(&self.buf[body_start..]);
+            (status, body_bytes)
+        } else {
+            (status, 0)
         }
     }
 

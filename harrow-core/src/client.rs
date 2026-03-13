@@ -7,6 +7,7 @@ use http_body_util::Full;
 
 use crate::dispatch::{SharedState, dispatch};
 use crate::request::full_body;
+use crate::response::ResponseBody;
 
 /// A test client that dispatches requests through the full middleware + routing
 /// pipeline without TCP. Created via `App::client()`.
@@ -83,9 +84,9 @@ pub struct TestResponse {
 }
 
 impl TestResponse {
-    async fn from_http(resp: http::Response<Full<Bytes>>) -> Self {
+    async fn from_http(resp: http::Response<ResponseBody>) -> Self {
         let (parts, body) = resp.into_parts();
-        let collected = body.collect().await.expect("Full<Bytes> never errors");
+        let collected = body.collect().await.expect("body collection failed");
         Self {
             status: parts.status,
             headers: parts.headers,

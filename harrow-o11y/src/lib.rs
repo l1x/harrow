@@ -1,8 +1,6 @@
-pub mod o11y_middleware;
-
 /// Configuration for Harrow's built-in observability.
 ///
-/// When an `otlp_*_endpoint` is `Some`, that signal is exported via ro11y's
+/// When an `otlp_*_endpoint` is `Some`, that signal is exported via rolly's
 /// OTLP exporter. When all are `None`, only JSON stderr logging is active
 /// (local dev mode).
 ///

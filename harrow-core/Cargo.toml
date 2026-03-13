@@ -6,14 +6,13 @@ license.workspace = true
 description = "Core types for Harrow: routing, request/response wrappers, middleware"
 
 [features]
-default = ["json"]
+default = []
 json = ["serde", "serde_json"]
-timeout = ["tokio"]
 profiling = []
 
 [dependencies]
-tokio = { workspace = true, optional = true }
 bytes = { workspace = true }
+futures-util = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }

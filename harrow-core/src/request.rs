@@ -129,9 +129,11 @@ impl Request {
     }
 
     /// Access application state of type `T`.
-    /// Panics if `T` was not registered via `App::state()`.
-    pub fn state<T: Send + Sync + 'static>(&self) -> &T {
-        self.state.get::<T>()
+    /// Returns `Err(MissingStateError)` if `T` was not registered via `App::state()`.
+    pub fn require_state<T: Send + Sync + 'static>(
+        &self,
+    ) -> Result<&T, crate::state::MissingStateError> {
+        self.state.require::<T>()
     }
 
     /// Try to access application state of type `T`.
@@ -486,12 +488,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_returns_typed_value() {
+    async fn require_state_returns_ok() {
         let mut state = TypeMap::new();
         state.insert(42u32);
         let req =
             test_util::make_request("GET", "/", &[], None, PathMatch::default(), state, None).await;
-        assert_eq!(*req.state::<u32>(), 42);
+        assert_eq!(*req.require_state::<u32>().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn require_state_returns_err_for_missing() {
+        let req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        assert!(req.require_state::<u32>().is_err());
     }
 
     #[tokio::test]

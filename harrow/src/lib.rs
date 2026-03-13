@@ -7,44 +7,53 @@ pub use harrow_core::handler;
 pub use harrow_core::middleware::{Middleware, Next};
 pub use harrow_core::path::PathPattern;
 pub use harrow_core::request::{BodyError, Request};
-pub use harrow_core::response::{IntoResponse, Response};
+pub use harrow_core::response::{IntoResponse, Response, ResponseBody};
 pub use harrow_core::route::{App, Group, Route, RouteMetadata, RouteTable};
-pub use harrow_core::state::TypeMap;
+pub use harrow_core::state::{MissingStateError, TypeMap};
 
-pub use harrow_server::{serve, serve_with_shutdown};
+pub use harrow_server::{ServerConfig, serve, serve_with_config, serve_with_shutdown};
 
 #[cfg(feature = "timeout")]
-pub use harrow_core::timeout::timeout_middleware;
+pub use harrow_middleware::timeout::timeout_middleware;
+
+#[cfg(feature = "request-id")]
+pub use harrow_middleware::request_id::{request_id_middleware, request_id_middleware_with_header};
+
+#[cfg(feature = "cors")]
+pub use harrow_middleware::cors::{CorsConfig, cors_middleware};
+
+#[cfg(feature = "compression")]
+pub use harrow_middleware::compression::compression_middleware;
 
 #[cfg(feature = "o11y")]
 pub mod o11y {
+    pub use harrow_middleware::o11y::o11y_middleware;
     pub use harrow_o11y::O11yConfig;
-    pub use harrow_o11y::o11y_middleware::o11y_middleware;
 }
 
 #[cfg(feature = "o11y")]
 mod o11y_ext {
     use std::sync::Arc;
 
+    use harrow_middleware::o11y::o11y_middleware;
     use harrow_o11y::O11yConfig;
-    use harrow_o11y::o11y_middleware::o11y_middleware;
 
     use crate::App;
 
     /// Extension trait that wires `O11yConfig` into application state,
-    /// initialises the ro11y telemetry subscriber, and registers the
+    /// initialises the rolly telemetry subscriber, and registers the
     /// o11y middleware in one call.
     pub trait AppO11yExt {
         fn o11y(self, config: O11yConfig) -> Self;
     }
 
-    /// Holds the ro11y `TelemetryGuard` so the OTLP exporter stays alive
+    /// Holds the rolly `TelemetryGuard` so the OTLP exporter stays alive
     /// for the lifetime of the application.
-    struct TelemetryGuardHolder(#[allow(dead_code)] ro11y::TelemetryGuard);
+    struct TelemetryGuardHolder(#[allow(dead_code)] rolly::TelemetryGuard);
 
     impl AppO11yExt for App {
         fn o11y(self, config: O11yConfig) -> Self {
-            let guard = ro11y::init(ro11y::TelemetryConfig {
+            let guard = rolly::init(rolly::TelemetryConfig {
                 service_name: config.service_name.clone(),
                 service_version: config.service_version.clone(),
                 environment: config.environment.clone(),

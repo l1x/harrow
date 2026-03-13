@@ -3,11 +3,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 
 use crate::middleware::{Middleware, Next};
 use crate::request::{Body, Request};
-use crate::response::Response;
+use crate::response::{Response, ResponseBody};
 use crate::route::RouteTable;
 use crate::state::TypeMap;
 
@@ -24,7 +24,7 @@ pub struct SharedState {
 pub async fn dispatch(
     shared: Arc<SharedState>,
     hyper_req: http::Request<Body>,
-) -> http::Response<Full<Bytes>> {
+) -> http::Response<ResponseBody> {
     let method = hyper_req.method().clone();
     let path = hyper_req.uri().path();
 
@@ -95,7 +95,10 @@ pub async fn dispatch(
     // HEAD fallback: strip body, keep status + headers (RFC 9110 §9.3.2).
     if is_head_fallback {
         let (parts, _body) = response.into_parts();
-        http::Response::from_parts(parts, Full::new(Bytes::new()))
+        let empty = Full::new(Bytes::new())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} })
+            .boxed();
+        http::Response::from_parts(parts, empty)
     } else {
         response
     }

@@ -1,16 +1,48 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+#[cfg(feature = "json")]
+use bytes::{BufMut, BytesMut};
+use futures_util::Stream;
 use http::StatusCode;
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+
+/// The response body type. Both buffered and streaming paths go through `BoxBody`
+/// so that all body types share a uniform `Body` impl for hyper's `serve_connection`.
+pub type ResponseBody = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Harrow's response wrapper. Built via chained methods, no builder traits.
 pub struct Response {
-    inner: http::Response<Full<Bytes>>,
+    inner: http::Response<ResponseBody>,
+}
+
+/// Box a `Full<Bytes>` into a `ResponseBody`. The `Infallible` error is
+/// mapped away at zero cost since it can never occur.
+fn full_to_body(full: Full<Bytes>) -> ResponseBody {
+    full.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} })
+        .boxed()
 }
 
 impl Response {
     /// Create a response with the given status and body.
     pub fn new(status: StatusCode, body: impl Into<Bytes>) -> Self {
-        let body = Full::new(body.into());
+        let body = full_to_body(Full::new(body.into()));
+        let inner = http::Response::builder()
+            .status(status)
+            .body(body)
+            .expect("valid response");
+        Self { inner }
+    }
+
+    /// Create a streaming response from a `Stream` of `Frame<Bytes>`.
+    pub fn streaming<S>(status: StatusCode, stream: S) -> Self
+    where
+        S: Stream<
+                Item = Result<hyper::body::Frame<Bytes>, Box<dyn std::error::Error + Send + Sync>>,
+            > + Send
+            + Sync
+            + 'static,
+    {
+        let body = StreamBody::new(stream).boxed();
         let inner = http::Response::builder()
             .status(status)
             .body(body)
@@ -85,8 +117,13 @@ impl Response {
         self.inner.status()
     }
 
+    /// Borrow the inner `http::Response` for inspection.
+    pub fn inner(&self) -> &http::Response<ResponseBody> {
+        &self.inner
+    }
+
     /// Consume and return the inner `http::Response`.
-    pub fn into_inner(self) -> http::Response<Full<Bytes>> {
+    pub fn into_inner(self) -> http::Response<ResponseBody> {
         self.inner
     }
 }
@@ -215,5 +252,18 @@ mod tests {
             Err(Response::new(StatusCode::INTERNAL_SERVER_ERROR, "error"));
         let resp = result.into_response();
         assert_eq!(resp.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn streaming_response_collects_frames() {
+        use hyper::body::Frame;
+        let chunks = vec![
+            Ok(Frame::data(Bytes::from("hello "))),
+            Ok(Frame::data(Bytes::from("world"))),
+        ];
+        let stream = futures_util::stream::iter(chunks);
+        let resp = Response::streaming(StatusCode::OK, stream);
+        assert_eq!(resp.status_code(), StatusCode::OK);
+        assert_eq!(body_bytes(resp).await, Bytes::from("hello world"));
     }
 }

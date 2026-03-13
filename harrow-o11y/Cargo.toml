@@ -11,5 +11,5 @@ profiling = []
 
 [dependencies]
 harrow-core = { workspace = true }
-ro11y = { workspace = true }
+rolly = { workspace = true }
 tracing = { workspace = true }

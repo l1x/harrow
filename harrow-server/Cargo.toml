@@ -27,7 +27,8 @@ hyper-rustls = { version = "0.27", optional = true }
 rustls = { version = "0.23", optional = true }
 
 [dev-dependencies]
-harrow-core = { workspace = true, features = ["timeout"] }
+harrow-core = { workspace = true }
+harrow-middleware = { workspace = true, features = ["timeout", "o11y"] }
 harrow-o11y = { workspace = true }
 hyper = { workspace = true, features = ["client"] }
 tokio = { workspace = true }

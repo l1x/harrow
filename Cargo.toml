@@ -3,21 +3,23 @@ resolver = "2"
 members = [
     "harrow",
     "harrow-core",
+    "harrow-middleware",
     "harrow-o11y",
     "harrow-server",
     "harrow-bench",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/l1x/harrow"
 
 [workspace.dependencies]
-harrow-core = { path = "harrow-core", version = "0.1.0" }
-harrow-o11y = { path = "harrow-o11y", version = "0.1.0" }
-harrow-server = { path = "harrow-server", version = "0.1.0" }
+harrow-core = { path = "harrow-core", version = "0.2.0" }
+harrow-o11y = { path = "harrow-o11y", version = "0.2.0" }
+harrow-middleware = { path = "harrow-middleware", version = "0.2.0" }
+harrow-server = { path = "harrow-server", version = "0.2.0" }
 
 bytes = "1"
 http = "1"
@@ -30,11 +32,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-ro11y = "0.5"
+rolly = "0.5"
 axum = "0.8"
 futures-util = "0.3"
 percent-encoding = "2"
 matchit = "0.8"
+flate2 = "1"
+brotli = "7"
 
 [profile.bench]
 debug = true

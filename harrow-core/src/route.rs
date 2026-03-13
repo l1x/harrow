@@ -160,11 +160,16 @@ impl RouteTable {
             Some(m) => m,
             None => return Vec::new(),
         };
-        self.method_maps[*matched.value]
+        let mut methods: Vec<Method> = self.method_maps[*matched.value]
             .entries
             .iter()
             .map(|(m, _)| m.clone())
-            .collect()
+            .collect();
+        // RFC 9110 §9.3.2: HEAD is implicitly supported when GET is.
+        if methods.iter().any(|m| m == Method::GET) && !methods.iter().any(|m| m == Method::HEAD) {
+            methods.push(Method::HEAD);
+        }
+        methods
     }
 }
 
@@ -640,7 +645,8 @@ mod tests {
             .map(|m| m.to_string())
             .collect();
         methods.sort();
-        assert_eq!(methods, vec!["DELETE", "GET", "POST"]);
+        // HEAD is implicitly added because GET is registered (RFC 9110 §9.3.2).
+        assert_eq!(methods, vec!["DELETE", "GET", "HEAD", "POST"]);
 
         // Non-existent path returns empty
         assert!(table.allowed_methods("/nope").is_empty());

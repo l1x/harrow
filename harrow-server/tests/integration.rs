@@ -8,9 +8,9 @@ use harrow_core::request::Request;
 use harrow_core::response::Response;
 use harrow_core::route::App;
 extern crate http;
-use harrow_core::timeout::timeout_middleware;
+use harrow_middleware::o11y::o11y_middleware;
+use harrow_middleware::timeout::timeout_middleware;
 use harrow_o11y::O11yConfig;
-use harrow_o11y::o11y_middleware::o11y_middleware;
 use http::StatusCode;
 
 /// Shared counter used as application state.
@@ -28,7 +28,7 @@ async fn greet(req: Request) -> Response {
 }
 
 async fn state_handler(req: Request) -> Response {
-    let counter = req.state::<Arc<HitCounter>>();
+    let counter = req.require_state::<Arc<HitCounter>>().unwrap();
     let count = counter.0.fetch_add(1, Ordering::Relaxed) + 1;
     Response::text(format!("hits: {count}"))
 }
@@ -423,7 +423,8 @@ async fn client_returns_405_with_allow_header() {
     let allow = resp.header("allow").expect("expected Allow header on 405");
     let mut methods: Vec<&str> = allow.split(", ").collect();
     methods.sort();
-    assert_eq!(methods, vec!["DELETE", "GET", "POST"]);
+    // HEAD is implicitly added because GET is registered (RFC 9110 §9.3.2).
+    assert_eq!(methods, vec!["DELETE", "GET", "HEAD", "POST"]);
 }
 
 // -- HEAD Auto-Handling (Client) ---------------------------------------------
@@ -659,6 +660,48 @@ async fn http_request(
     };
 
     (status, headers, body)
+}
+
+// -- Graceful Drain Test (TCP) -----------------------------------------------
+
+#[tokio::test]
+async fn tcp_graceful_drain_completes_inflight_request() {
+    let app = App::new().get("/slow", slow_handler);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        harrow_server::serve_with_config(
+            app,
+            addr,
+            async {
+                let _ = rx.await;
+            },
+            harrow_server::ServerConfig {
+                drain_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Start a request to the slow handler (takes 200ms).
+    let request_handle = tokio::spawn(async move { http_get(addr, "/slow").await });
+
+    // Wait a bit for the request to reach the handler, then signal shutdown.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = tx.send(());
+
+    // The in-flight request should still complete despite shutdown signal.
+    let (status, _, body) = request_handle.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "slow");
 }
 
 #[tokio::test]
