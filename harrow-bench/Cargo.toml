@@ -6,12 +6,14 @@ license.workspace = true
 description = "Benchmarks and load driver for Harrow"
 
 [dependencies]
-harrow = { path = "../harrow", features = ["json", "timeout", "request-id", "cors", "compression"] }
-harrow-core = { workspace = true, features = ["json"] }
+harrow = { path = "../harrow", features = ["json", "msgpack", "timeout", "request-id", "cors", "compression", "o11y"] }
+harrow-core = { workspace = true, features = ["json", "msgpack"] }
+harrow-o11y = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rmp-serde = { workspace = true }
 http = { workspace = true }
 toml = "0.8"
 
@@ -53,6 +55,14 @@ path = "src/bin/measure_allocs.rs"
 [[bin]]
 name = "profile-concurrent"
 path = "src/bin/profile_concurrent.rs"
+
+[[bin]]
+name = "serde-bench-server"
+path = "src/bin/serde_bench_server.rs"
+
+[[bin]]
+name = "axum-serde-server"
+path = "src/bin/axum_serde_server.rs"
 
 [[bin]]
 name = "stat-bench"

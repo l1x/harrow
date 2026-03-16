@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use harrow::{App, Next, Request, Response};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Server helpers
@@ -102,6 +103,78 @@ pub async fn json_10kb_handler(_req: Request) -> Response {
 pub async fn simulated_io_handler(_req: Request) -> Response {
     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
     Response::json(&*JSON_1KB)
+}
+
+// ---------------------------------------------------------------------------
+// Typed payloads for serde benchmarks (JSON + MessagePack)
+// ---------------------------------------------------------------------------
+
+/// Typed user struct — identical data for JSON and MessagePack serialisation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct User {
+    pub id: u32,
+    pub name: String,
+    pub email: String,
+    pub active: bool,
+    pub score: u32,
+    pub tags: Vec<String>,
+}
+
+/// Small payload: ~100B JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmallPayload {
+    pub status: String,
+    pub code: u32,
+}
+
+pub static SMALL_PAYLOAD: LazyLock<SmallPayload> = LazyLock::new(|| SmallPayload {
+    status: "ok".into(),
+    code: 200,
+});
+
+fn make_users(n: u32) -> Vec<User> {
+    (0..n)
+        .map(|i| User {
+            id: i,
+            name: format!("User {i}"),
+            email: format!("user{i}@example.com"),
+            active: i % 2 == 0,
+            score: i * 17 + 42,
+            tags: vec!["bench".into(), "test".into(), "user".into()],
+        })
+        .collect()
+}
+
+/// 10 user objects — ~1KB when JSON-encoded.
+pub static USERS_10: LazyLock<Vec<User>> = LazyLock::new(|| make_users(10));
+
+/// 100 user objects — ~10KB when JSON-encoded.
+pub static USERS_100: LazyLock<Vec<User>> = LazyLock::new(|| make_users(100));
+
+// --- Harrow handlers for serde benchmarks ---
+
+pub async fn json_small_handler(_req: Request) -> Response {
+    Response::json(&*SMALL_PAYLOAD)
+}
+
+pub async fn json_1kb_typed_handler(_req: Request) -> Response {
+    Response::json(&*USERS_10)
+}
+
+pub async fn json_10kb_typed_handler(_req: Request) -> Response {
+    Response::json(&*USERS_100)
+}
+
+pub async fn msgpack_small_handler(_req: Request) -> Response {
+    Response::msgpack(&*SMALL_PAYLOAD)
+}
+
+pub async fn msgpack_1kb_handler(_req: Request) -> Response {
+    Response::msgpack(&*USERS_10)
+}
+
+pub async fn msgpack_10kb_handler(_req: Request) -> Response {
+    Response::msgpack(&*USERS_100)
 }
 
 // ---------------------------------------------------------------------------
