@@ -22,7 +22,10 @@ const SSH_USER: &str = "alpine";
 const DEFAULT_SPINR_BIN: &str = "/usr/local/bin/spinr";
 const SLEEP_BETWEEN_RUNS: Duration = Duration::from_secs(2);
 const MONITOR_MARGIN_SECS: u32 = 2;
-const PERF_COUNTERS: &str = "cycles,instructions,branches,branch-misses,cache-references,cache-misses,context-switches,cpu-migrations,page-faults";
+// AWS guests in this setup do not expose the hardware PMU, so stick to
+// software counters that are available under virtualization.
+const PERF_COUNTERS: &str =
+    "task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TestCase {
@@ -633,11 +636,39 @@ fn start_host_monitors(args: &Args, key: &str, server_pid: Option<u32>) {
     }
 }
 
+/// Build a `perf stat` command string.
+///
+/// Two modes:
+/// - **attach**: monitor an existing process (`-p PID -- sleep N`)
+/// - **wrap**: launch a child command (`-- child_cmd`)
+fn perf_stat_cmd(output_path: &str, target: PerfTarget<'_>) -> String {
+    let target_args = match target {
+        PerfTarget::AttachPid { pid, sleep_secs } => {
+            format!("-p {pid} -- sleep {sleep_secs}")
+        }
+        PerfTarget::WrapCmd { cmd } => {
+            format!("-- {cmd}")
+        }
+    };
+    format!(
+        "doas sh -lc 'perf stat -x, -e {PERF_COUNTERS} -o {output_path} {target_args}; \
+         status=$?; test -f {output_path} && chmod 0644 {output_path}; exit $status'"
+    )
+}
+
+enum PerfTarget<'a> {
+    AttachPid { pid: u32, sleep_secs: u32 },
+    WrapCmd { cmd: &'a str },
+}
+
 fn start_server_perf_stat(args: &Args, key: &str, server_pid: u32) {
     let perf_path = remote_artifact_path(key, RemoteSide::Server, "perf-stat.txt");
-    let load_secs = args.warmup + args.duration;
-    let cmd = format!(
-        "perf stat -x, -e {PERF_COUNTERS} -o {perf_path} -p {server_pid} -- sleep {load_secs}"
+    let cmd = perf_stat_cmd(
+        &perf_path,
+        PerfTarget::AttachPid {
+            pid: server_pid,
+            sleep_secs: args.warmup + args.duration,
+        },
     );
     start_remote_capture(args, RemoteSide::Server, &cmd);
 }
@@ -753,7 +784,7 @@ fn run_bench(
         ),
         SpinrMode::Host if args.perf_stat => {
             let perf_path = remote_artifact_path(key, RemoteSide::Client, "perf-stat.txt");
-            format!("perf stat -x, -e {PERF_COUNTERS} -o {perf_path} -- {spinr_cmd}")
+            perf_stat_cmd(&perf_path, PerfTarget::WrapCmd { cmd: &spinr_cmd })
         }
         SpinrMode::Host => spinr_cmd.clone(),
     };
@@ -1136,12 +1167,15 @@ fn preflight_checks(args: &Args) {
         let out = ssh_run(
             &args.ssh_user,
             &args.server_ssh,
-            "command -v perf >/dev/null && echo ok",
+            "command -v perf >/dev/null && command -v doas >/dev/null && doas -n true >/dev/null 2>&1 && echo ok",
         );
         match out {
-            Ok(o) if o.status.success() => println!("  perf on server: ok"),
+            Ok(o) if o.status.success() => println!("  perf on server via doas: ok"),
             _ => {
-                eprintln!("  perf on server ({}): MISSING", args.server_ssh);
+                eprintln!(
+                    "  perf on server ({}): MISSING or doas not usable",
+                    args.server_ssh
+                );
                 std::process::exit(1);
             }
         }
@@ -1150,12 +1184,15 @@ fn preflight_checks(args: &Args) {
             let out = ssh_run(
                 &args.ssh_user,
                 &args.client_ssh,
-                "command -v perf >/dev/null && echo ok",
+                "command -v perf >/dev/null && command -v doas >/dev/null && doas -n true >/dev/null 2>&1 && echo ok",
             );
             match out {
-                Ok(o) if o.status.success() => println!("  perf on client: ok"),
+                Ok(o) if o.status.success() => println!("  perf on client via doas: ok"),
                 _ => {
-                    eprintln!("  perf on client ({}): MISSING", args.client_ssh);
+                    eprintln!(
+                        "  perf on client ({}): MISSING or doas not usable",
+                        args.client_ssh
+                    );
                     std::process::exit(1);
                 }
             }
