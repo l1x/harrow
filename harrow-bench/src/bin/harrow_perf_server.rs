@@ -14,7 +14,7 @@
 //!
 //! Optional `--o11y` flag enables observability middleware globally.
 //!
-//! Usage: serde-bench-server [--bind ADDR] [--port PORT] [--o11y]
+//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y]
 
 use std::time::Duration;
 
@@ -53,7 +53,7 @@ fn parse_args() -> (String, u16, bool) {
             }
             other => {
                 eprintln!("unknown option: {other}");
-                eprintln!("usage: serde-bench-server [--bind ADDR] [--port PORT] [--o11y]");
+                eprintln!("usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y]");
                 std::process::exit(1);
             }
         }
@@ -129,7 +129,7 @@ async fn main() {
         eprintln!("o11y enabled");
     }
 
-    eprintln!("serde-bench-server listening on {addr}");
+    eprintln!("harrow-perf-server listening on {addr}");
     harrow::serve(app, addr).await.unwrap();
 }
 

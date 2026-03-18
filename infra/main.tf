@@ -51,7 +51,7 @@ data "http" "my_ip" {
 
 locals {
   my_ip = "${trimspace(data.http.my_ip.response_body)}/32"
-  az    = data.aws_availability_zones.available.names[0]
+  az    = var.availability_zone != "" ? var.availability_zone : data.aws_availability_zones.available.names[0]
   ami   = data.aws_ami.alpine.id
 
   common_tags = {
@@ -75,16 +75,23 @@ resource "aws_placement_group" "bench" {
 # ECR repositories (via datadeft module)
 # ---------------------------------------------------------------------------
 
-module "ecr_serde_bench_server" {
+module "ecr_harrow_perf_server" {
   source          = "s3::https://s3-eu-west-1.amazonaws.com/datadeft-tf-modules/components/ecr-v1.0.0.zip"
-  repository-name = "harrow/serde-bench-server"
+  repository-name = "harrow/harrow-perf-server"
   stage           = "bench"
   force-delete    = true
 }
 
-module "ecr_axum_serde_server" {
+module "ecr_axum_perf_server" {
   source          = "s3::https://s3-eu-west-1.amazonaws.com/datadeft-tf-modules/components/ecr-v1.0.0.zip"
-  repository-name = "harrow/axum-serde-server"
+  repository-name = "harrow/axum-perf-server"
+  stage           = "bench"
+  force-delete    = true
+}
+
+module "ecr_spinr" {
+  source          = "s3::https://s3-eu-west-1.amazonaws.com/datadeft-tf-modules/components/ecr-v1.0.0.zip"
+  repository-name = "harrow/spinr"
   stage           = "bench"
   force-delete    = true
 }
@@ -132,8 +139,9 @@ resource "aws_iam_role_policy" "bench_ecr_pull" {
           "ecr:BatchCheckLayerAvailability",
         ]
         Resource = [
-          module.ecr_serde_bench_server.ecr-repository-arn,
-          module.ecr_axum_serde_server.ecr-repository-arn,
+          module.ecr_harrow_perf_server.ecr-repository-arn,
+          module.ecr_axum_perf_server.ecr-repository-arn,
+          module.ecr_spinr.ecr-repository-arn,
         ]
       }
     ]

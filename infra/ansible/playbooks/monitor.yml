@@ -1,0 +1,12 @@
+- name: Start OS monitoring
+  hosts: all
+  tasks:
+    - name: Start sar network counters
+      ansible.builtin.shell: |
+        nohup sar -n DEV 1 1020 >/tmp/sar-net.log 2>&1 & echo $! >/tmp/sar-net.pid
+    - name: Start sar cpu counters
+      ansible.builtin.shell: |
+        nohup sar -P ALL 1 1020 >/tmp/sar-cpu.log 2>&1 & echo $! >/tmp/sar-cpu.pid
+    - name: Start vmstat logging
+      ansible.builtin.shell: |
+        nohup vmstat 1 1020 >/tmp/vmstat.log 2>&1 & echo $! >/tmp/vmstat.pid

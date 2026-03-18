@@ -57,16 +57,16 @@ name = "profile-concurrent"
 path = "src/bin/profile_concurrent.rs"
 
 [[bin]]
-name = "serde-bench-server"
-path = "src/bin/serde_bench_server.rs"
+name = "harrow-perf-server"
+path = "src/bin/harrow_perf_server.rs"
 
 [[bin]]
-name = "axum-serde-server"
-path = "src/bin/axum_serde_server.rs"
+name = "axum-perf-server"
+path = "src/bin/axum_perf_server.rs"
 
 [[bin]]
-name = "serde-bench"
-path = "src/bin/serde_bench.rs"
+name = "harrow-remote-perf-test"
+path = "src/bin/harrow_remote_perf_test.rs"
 
 [[bin]]
 name = "stat-bench"

@@ -8,4 +8,4 @@ http.address = "0.0.0.0:4318"
 
 [sinks.blackhole]
 type = "blackhole"
-inputs = ["otlp"]
+inputs = ["otlp.logs", "otlp.metrics", "otlp.traces"]

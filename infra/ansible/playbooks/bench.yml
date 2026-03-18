@@ -1,5 +1,8 @@
 - name: Benchmark instances
   hosts: all
+  vars:
+    ecr_registry: "529001354082.dkr.ecr.eu-west-1.amazonaws.com"
+    aws_region: "eu-west-1"
   roles:
     - role: os
     - role: bench

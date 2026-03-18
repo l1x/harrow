@@ -5,7 +5,7 @@ COPY . /app
 RUN rustup target add aarch64-unknown-linux-gnu && \
     cargo build --release --target=aarch64-unknown-linux-gnu \
         --bin harrow-server --bin axum-server \
-        --bin serde-bench-server --bin axum-serde-server
+        --bin harrow-perf-server --bin axum-perf-server
 
 # --- harrow-server ---
 FROM gcr.io/distroless/cc-debian13:latest-arm64 AS harrow-server
@@ -17,12 +17,12 @@ FROM gcr.io/distroless/cc-debian13:latest-arm64 AS axum-server
 COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/axum-server /
 CMD ["/axum-server", "--bind", "0.0.0.0"]
 
-# --- serde-bench-server ---
-FROM gcr.io/distroless/cc-debian13:latest-arm64 AS serde-bench-server
-COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/serde-bench-server /
-CMD ["/serde-bench-server", "--bind", "0.0.0.0"]
+# --- harrow-perf-server ---
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS harrow-perf-server
+COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/harrow-perf-server /
+CMD ["/harrow-perf-server", "--bind", "0.0.0.0"]
 
-# --- axum-serde-server ---
-FROM gcr.io/distroless/cc-debian13:latest-arm64 AS axum-serde-server
-COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/axum-serde-server /
-CMD ["/axum-serde-server", "--bind", "0.0.0.0"]
+# --- axum-perf-server ---
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS axum-perf-server
+COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/axum-perf-server /
+CMD ["/axum-perf-server", "--bind", "0.0.0.0"]

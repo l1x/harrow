@@ -1,9 +1,9 @@
-//! Axum serde benchmark server.
+//! Axum performance benchmark server.
 //!
-//! Same endpoints and payloads as serde_bench_server for framework comparison.
+//! Same endpoints and payloads as harrow_perf_server for framework comparison.
 //! No o11y — raw serialization throughput only.
 //!
-//! Usage: axum-serde-server [--bind ADDR] [--port PORT]
+//! Usage: axum-perf-server [--bind ADDR] [--port PORT]
 
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
@@ -66,7 +66,7 @@ fn parse_args() -> (String, u16) {
             }
             other => {
                 eprintln!("unknown option: {other}");
-                eprintln!("usage: axum-serde-server [--bind ADDR] [--port PORT]");
+                eprintln!("usage: axum-perf-server [--bind ADDR] [--port PORT]");
                 std::process::exit(1);
             }
         }
@@ -96,6 +96,6 @@ async fn main() {
         .nest("/bare", bare_routes);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    eprintln!("axum-serde-server listening on {addr}");
+    eprintln!("axum-perf-server listening on {addr}");
     axum::serve(listener, app).await.unwrap();
 }
