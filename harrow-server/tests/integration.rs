@@ -590,11 +590,8 @@ async fn tcp_o11y_middleware_adds_request_id_header() {
     let rid = header_val(&headers, "x-request-id");
     assert!(rid.is_some(), "expected x-request-id header");
     let rid = rid.unwrap();
-    assert_eq!(rid.len(), 32, "expected 32-char hex trace ID");
-    assert!(
-        rid.chars().all(|c| c.is_ascii_hexdigit()),
-        "expected hex characters only"
-    );
+    assert_eq!(rid.len(), 11, "expected 11-char request ID");
+    assert!(rid.is_ascii(), "expected ASCII characters only");
 }
 
 #[tokio::test]

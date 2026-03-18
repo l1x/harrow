@@ -64,6 +64,7 @@ mod o11y_ext {
                 use_metrics_interval: None,
                 metrics_flush_interval: None,
                 sampling_rate: None,
+                backpressure_strategy: rolly::BackpressureStrategy::Drop,
             });
 
             self.state(Arc::new(TelemetryGuardHolder(guard)))

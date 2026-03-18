@@ -721,6 +721,7 @@ dependencies = [
 name = "harrow-middleware"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "brotli",
  "bytes",
  "flate2",
@@ -1563,9 +1564,9 @@ dependencies = [
 
 [[package]]
 name = "rolly"
-version = "0.5.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "779bff8f1561d18ee61b3ac1b3af6d814308a6be9c6546e3fb069787e2340c6b"
+checksum = "93d7f5e7ce78201263c7dbc6ed28df9a047a775771e71baba644f1b1da616e48"
 dependencies = [
  "blake3",
  "bytes",
