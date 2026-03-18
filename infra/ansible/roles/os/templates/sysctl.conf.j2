@@ -28,3 +28,7 @@ net.ipv4.ip_local_port_range=1024 65535
 
 # File descriptors
 fs.file-max=2097152
+
+# Perf profiling — expose kernel symbols and allow non-root perf
+kernel.kptr_restrict=0
+kernel.perf_event_paranoid=1

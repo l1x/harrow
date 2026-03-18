@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "harrow"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "harrow-core",
  "harrow-middleware",
@@ -678,14 +678,19 @@ dependencies = [
 
 [[package]]
 name = "harrow-bench"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
+ "bytes",
  "criterion",
+ "futures-util",
  "harrow",
  "harrow-core",
  "harrow-o11y",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "matchit",
  "rmp-serde",
  "serde",
@@ -699,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -719,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-middleware"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "brotli",
@@ -737,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-o11y"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "harrow-core",
  "rolly",
@@ -746,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-serde"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -756,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures-util",

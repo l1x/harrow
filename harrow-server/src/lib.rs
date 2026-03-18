@@ -1,10 +1,8 @@
 use std::future::Future;
 use std::net::SocketAddr;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::FutureExt;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -14,7 +12,6 @@ use tokio::task::JoinSet;
 
 use harrow_core::dispatch::{SharedState, dispatch};
 use harrow_core::request::box_incoming;
-use harrow_core::response::{Response, ResponseBody};
 use harrow_core::route::{App, RouteTable};
 
 /// Configuration for server connection handling.
@@ -119,7 +116,10 @@ pub async fn serve_with_config(
 
                     let service = service_fn(move |req: http::Request<Incoming>| {
                         let shared = Arc::clone(&shared);
-                        async move { Ok::<_, std::convert::Infallible>(dispatch_safe(shared, req).await) }
+                        async move {
+                            let boxed = req.map(box_incoming);
+                            Ok::<_, std::convert::Infallible>(dispatch(shared, boxed).await)
+                        }
                     });
 
                     let mut builder = hyper_util::server::conn::auto::Builder::new(
@@ -161,34 +161,6 @@ pub async fn serve_with_config(
     }
 
     Ok(())
-}
-
-/// Catch panics from dispatch and convert to 500 responses.
-async fn dispatch_safe(
-    shared: Arc<SharedState>,
-    hyper_req: http::Request<Incoming>,
-) -> http::Response<ResponseBody> {
-    // Box the Incoming body at the server boundary.
-    let boxed = hyper_req.map(box_incoming);
-    match AssertUnwindSafe(dispatch(shared, boxed))
-        .catch_unwind()
-        .await
-    {
-        Ok(response) => response,
-        Err(panic_payload) => {
-            let msg = panic_payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            tracing::error!("handler panicked: {msg}");
-            Response::new(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error",
-            )
-            .into_inner()
-        }
-    }
 }
 
 fn print_route_table(table: &RouteTable) {

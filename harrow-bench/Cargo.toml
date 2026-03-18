@@ -23,6 +23,11 @@ matchit = { workspace = true }
 tower-http = { version = "0.6", features = ["timeout", "request-id", "cors", "compression-gzip"] }
 tower = "0.5"
 uuid = { version = "1", features = ["v4"] }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+futures-util = { workspace = true }
 
 [[bin]]
 name = "harrow-server"
@@ -98,4 +103,20 @@ harness = false
 
 [[bench]]
 name = "middleware_compare"
+harness = false
+
+[[bench]]
+name = "dispatch"
+harness = false
+
+[[bench]]
+name = "perf_isolation"
+harness = false
+
+[[bench]]
+name = "scaling"
+harness = false
+
+[[bench]]
+name = "server_variants"
 harness = false

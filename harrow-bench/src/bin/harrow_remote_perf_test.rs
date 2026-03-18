@@ -3,7 +3,7 @@
 //! Runs from the laptop and drives both EC2 nodes via SSH:
 //! - server node runs `harrow-perf-server` or `axum-perf-server` in Docker
 //! - client node runs `spinr` either in Docker or directly on the host
-//! - optional host telemetry and `perf stat` are collected per run
+//! - optional host telemetry plus `perf stat` / `perf record` are collected per run
 //!
 //! The runner is intentionally small and explicit: each invocation selects one
 //! or more named test cases and runs Harrow/Axum back-to-back for each case.
@@ -26,6 +26,8 @@ const MONITOR_MARGIN_SECS: u32 = 2;
 // software counters that are available under virtualization.
 const PERF_COUNTERS: &str =
     "task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults";
+const PERF_RECORD_FREQ_HZ: u32 = 1000;
+const PERF_RECORD_CALL_GRAPH: &str = "fp";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TestCase {
@@ -110,6 +112,40 @@ impl SpinrMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PerfMode {
+    Stat,
+    Record,
+    Both,
+}
+
+impl PerfMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stat" => Some(Self::Stat),
+            "record" => Some(Self::Record),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stat => "stat",
+            Self::Record => "record",
+            Self::Both => "both",
+        }
+    }
+
+    fn collects_stat(self) -> bool {
+        matches!(self, Self::Stat | Self::Both)
+    }
+
+    fn collects_record(self) -> bool {
+        matches!(self, Self::Record | Self::Both)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteSide {
     Server,
     Client,
@@ -172,21 +208,33 @@ struct Args {
     results_dir: std::path::PathBuf,
     test_cases: Vec<TestCase>,
     os_monitors: bool,
-    perf_stat: bool,
+    perf_enabled: bool,
+    perf_mode: PerfMode,
     spinr_mode: SpinrMode,
 }
 
 fn client_perf_enabled(args: &Args) -> bool {
-    args.perf_stat && args.spinr_mode == SpinrMode::Host
+    args.perf_enabled && args.spinr_mode == SpinrMode::Host
 }
 
-fn perf_scope_label(args: &Args) -> &'static str {
-    if !args.perf_stat {
-        "off"
-    } else if client_perf_enabled(args) {
-        "server + client"
+fn perf_stat_enabled(args: &Args) -> bool {
+    args.perf_enabled && args.perf_mode.collects_stat()
+}
+
+fn perf_record_enabled(args: &Args) -> bool {
+    args.perf_enabled && args.perf_mode.collects_record()
+}
+
+fn perf_scope_label(args: &Args) -> String {
+    if !args.perf_enabled {
+        "off".into()
     } else {
-        "server only"
+        let scope = if client_perf_enabled(args) {
+            "server + client"
+        } else {
+            "server only"
+        };
+        format!("{} ({scope})", args.perf_mode.as_str())
     }
 }
 
@@ -234,7 +282,8 @@ fn usage() -> ! {
          \x20 --warmup SECS          Warmup duration per run (default: 5)\n\
          \x20 --results-dir DIR      Override output directory (default: docs/perf/<instance-type>/<timestamp>)\n\
          \x20 --os-monitors          Collect vmstat/sar/iostat/pidstat artifacts on both nodes\n\
-         \x20 --perf                 Collect perf stat artifacts on the server; also on the client when --spinr-mode host\n\
+         \x20 --perf                 Collect perf artifacts (default mode: stat)\n\
+         \x20 --perf-mode MODE      Perf mode: stat|record|both (default: stat)\n\
          \x20 --spinr-mode MODE      Client load generator mode: docker|host (default: docker)\n\
          \n\
          Supported test cases:\n\
@@ -258,7 +307,8 @@ fn parse_args() -> Args {
     let mut test_cases = Vec::new();
     let mut list_test_cases = false;
     let mut os_monitors = false;
-    let mut perf_stat = false;
+    let mut perf_enabled = false;
+    let mut perf_mode = PerfMode::Stat;
     let mut spinr_mode = SpinrMode::Docker;
 
     let mut i = 1;
@@ -320,9 +370,27 @@ fn parse_args() -> Args {
                 os_monitors = true;
                 i += 1;
             }
-            "--perf" | "--perf-stat" => {
-                perf_stat = true;
+            "--perf" => {
+                perf_enabled = true;
                 i += 1;
+            }
+            "--perf-stat" => {
+                perf_enabled = true;
+                perf_mode = PerfMode::Stat;
+                i += 1;
+            }
+            "--perf-record" => {
+                perf_enabled = true;
+                perf_mode = PerfMode::Record;
+                i += 1;
+            }
+            "--perf-mode" => {
+                perf_enabled = true;
+                perf_mode = PerfMode::parse(&args[i + 1]).unwrap_or_else(|| {
+                    eprintln!("invalid --perf-mode: {}", args[i + 1]);
+                    usage();
+                });
+                i += 2;
             }
             "--spinr-mode" => {
                 spinr_mode = SpinrMode::parse(&args[i + 1]).unwrap_or_else(|| {
@@ -381,7 +449,8 @@ fn parse_args() -> Args {
         results_dir,
         test_cases,
         os_monitors,
-        perf_stat,
+        perf_enabled,
+        perf_mode,
         spinr_mode,
     }
 }
@@ -641,24 +710,34 @@ fn start_host_monitors(args: &Args, key: &str, server_pid: Option<u32>) {
 /// Two modes:
 /// - **attach**: monitor an existing process (`-p PID -- sleep N`)
 /// - **wrap**: launch a child command (`-- child_cmd`)
-fn perf_stat_cmd(output_path: &str, target: PerfTarget<'_>) -> String {
+fn perf_stat_cmd(output_path: &str, target: PerfTarget) -> String {
     let target_args = match target {
         PerfTarget::AttachPid { pid, sleep_secs } => {
             format!("-p {pid} -- sleep {sleep_secs}")
         }
-        PerfTarget::WrapCmd { cmd } => {
-            format!("-- {cmd}")
-        }
     };
     format!(
-        "doas sh -lc 'perf stat -x, -e {PERF_COUNTERS} -o {output_path} {target_args}; \
-         status=$?; test -f {output_path} && chmod 0644 {output_path}; exit $status'"
+        "sh -lc 'doas perf stat -x, -e {PERF_COUNTERS} -o {output_path} {target_args}; \
+         status=$?; if test -f {output_path}; then doas chmod 0644 {output_path} >/dev/null 2>&1 || true; fi; exit $status'"
     )
 }
 
-enum PerfTarget<'a> {
+fn perf_record_cmd(output_path: &str, target: PerfTarget) -> String {
+    let target_args = match target {
+        PerfTarget::AttachPid { pid, sleep_secs } => {
+            format!("-p {pid} -- sleep {sleep_secs}")
+        }
+    };
+    format!(
+        "sh -lc 'doas perf record -m 1M -s -e cpu-clock --call-graph {PERF_RECORD_CALL_GRAPH} -F {PERF_RECORD_FREQ_HZ} \
+         -o {output_path} {target_args}; status=$?; \
+         if test -f {output_path}; then doas chmod 0644 {output_path} >/dev/null 2>&1 || true; fi; \
+         exit $status'"
+    )
+}
+
+enum PerfTarget {
     AttachPid { pid: u32, sleep_secs: u32 },
-    WrapCmd { cmd: &'a str },
 }
 
 fn start_server_perf_stat(args: &Args, key: &str, server_pid: u32) {
@@ -671,6 +750,69 @@ fn start_server_perf_stat(args: &Args, key: &str, server_pid: u32) {
         },
     );
     start_remote_capture(args, RemoteSide::Server, &cmd);
+}
+
+fn start_server_perf_record(args: &Args, key: &str, server_pid: u32) {
+    let perf_path = remote_artifact_path(key, RemoteSide::Server, "perf.data");
+    let cmd = perf_record_cmd(
+        &perf_path,
+        PerfTarget::AttachPid {
+            pid: server_pid,
+            sleep_secs: args.warmup + args.duration,
+        },
+    );
+    start_remote_capture(args, RemoteSide::Server, &cmd);
+}
+
+fn host_spinr_perf_cmd(args: &Args, key: &str, spinr_cmd: &str) -> String {
+    let spinr_stdout_path = remote_artifact_path(key, RemoteSide::Client, "spinr-stdout.json");
+    let spinr_stderr_path = remote_artifact_path(key, RemoteSide::Client, "spinr-stderr.txt");
+    let mut script = format!(
+        "sh -lc 'out={spinr_stdout_path}; err={spinr_stderr_path}; \
+         rm -f $out $err; \
+         {spinr_cmd} >$out 2>$err & spinr_pid=$!; "
+    );
+
+    if perf_stat_enabled(args) {
+        let stat_path = remote_artifact_path(key, RemoteSide::Client, "perf-stat.txt");
+        script.push_str(&format!(
+            "doas perf stat -x, -e {PERF_COUNTERS} -o {stat_path} -p $spinr_pid -- sleep {} \
+             >/dev/null 2>&1 & perf_stat_pid=$!; ",
+            args.warmup + args.duration
+        ));
+    }
+
+    if perf_record_enabled(args) {
+        let record_path = remote_artifact_path(key, RemoteSide::Client, "perf.data");
+        script.push_str(&format!(
+            "doas perf record -m 1M -s -e cpu-clock --call-graph {PERF_RECORD_CALL_GRAPH} -F {PERF_RECORD_FREQ_HZ} \
+             -o {record_path} -p $spinr_pid -- sleep {} >/dev/null 2>&1 & perf_record_pid=$!; ",
+            args.warmup + args.duration
+        ));
+    }
+
+    script.push_str("wait $spinr_pid; status=$?; ");
+
+    if perf_stat_enabled(args) {
+        let stat_path = remote_artifact_path(key, RemoteSide::Client, "perf-stat.txt");
+        script.push_str(&format!(
+            "wait $perf_stat_pid || true; \
+             if test -f {stat_path}; then doas chmod 0644 {stat_path} >/dev/null 2>&1 || true; fi; "
+        ));
+    }
+
+    if perf_record_enabled(args) {
+        let record_path = remote_artifact_path(key, RemoteSide::Client, "perf.data");
+        script.push_str(&format!(
+            "wait $perf_record_pid || true; \
+             if test -f {record_path}; then doas chmod 0644 {record_path} >/dev/null 2>&1 || true; fi; "
+        ));
+    }
+
+    script.push_str(
+        "cat $out; if test -s $err; then cat $err >&2; fi; rm -f $out $err; exit $status'",
+    );
+    script
 }
 
 fn collect_run_artifacts(args: &Args, key: &str) {
@@ -716,19 +858,30 @@ fn collect_run_artifacts(args: &Args, key: &str) {
         }
     }
 
-    if args.perf_stat {
+    if args.perf_enabled {
         let mut sides = vec![RemoteSide::Server];
         if client_perf_enabled(args) {
             sides.push(RemoteSide::Client);
         }
 
         for side in sides {
-            let remote_path = remote_artifact_path(key, side, "perf-stat.txt");
-            let local_path = args
-                .results_dir
-                .join(format!("{key}.{}.perf-stat.txt", side.label()));
-            pull_remote_file(args, side, &remote_path, &local_path);
-            cleanup_remote_file(args, side, &remote_path);
+            if perf_stat_enabled(args) {
+                let remote_path = remote_artifact_path(key, side, "perf-stat.txt");
+                let local_path = args
+                    .results_dir
+                    .join(format!("{key}.{}.perf-stat.txt", side.label()));
+                pull_remote_file(args, side, &remote_path, &local_path);
+                cleanup_remote_file(args, side, &remote_path);
+            }
+
+            if perf_record_enabled(args) {
+                let remote_path = remote_artifact_path(key, side, "perf.data");
+                let local_path = args
+                    .results_dir
+                    .join(format!("{key}.{}.perf.data", side.label()));
+                pull_remote_file(args, side, &remote_path, &local_path);
+                cleanup_remote_file(args, side, &remote_path);
+            }
         }
     }
 }
@@ -753,9 +906,14 @@ fn write_run_meta(
         "client_host": args.client_ssh,
         "spinr_mode": args.spinr_mode.as_str(),
         "os_monitors": args.os_monitors,
-        "perf_stat": args.perf_stat,
-        "server_perf_stat": args.perf_stat,
-        "client_perf_stat": client_perf_enabled(args),
+        "perf_enabled": args.perf_enabled,
+        "perf_mode": args.perf_mode.as_str(),
+        "perf_stat": perf_stat_enabled(args),
+        "perf_record": perf_record_enabled(args),
+        "server_perf_stat": perf_stat_enabled(args),
+        "server_perf_record": perf_record_enabled(args),
+        "client_perf_stat": perf_stat_enabled(args) && client_perf_enabled(args),
+        "client_perf_record": perf_record_enabled(args) && client_perf_enabled(args),
         "perf_scope": perf_scope_label(args),
         "started_at_utc": started_at_utc,
         "completed_at_utc": completed_at_utc,
@@ -782,10 +940,7 @@ fn run_bench(
              --max-throughput -c {concurrency} -d {} -w {} -j {url}",
             args.duration, args.warmup
         ),
-        SpinrMode::Host if args.perf_stat => {
-            let perf_path = remote_artifact_path(key, RemoteSide::Client, "perf-stat.txt");
-            perf_stat_cmd(&perf_path, PerfTarget::WrapCmd { cmd: &spinr_cmd })
-        }
+        SpinrMode::Host if client_perf_enabled(args) => host_spinr_perf_cmd(args, key, &spinr_cmd),
         SpinrMode::Host => spinr_cmd.clone(),
     };
 
@@ -864,10 +1019,17 @@ fn run_test_case(
         thread::sleep(Duration::from_secs(MONITOR_MARGIN_SECS as u64));
     }
 
-    if args.perf_stat {
+    if args.perf_enabled {
         match server_pid {
-            Some(pid) => start_server_perf_stat(args, &key, pid),
-            None => eprintln!("    warning: failed to determine server PID for perf stat"),
+            Some(pid) => {
+                if perf_stat_enabled(args) {
+                    start_server_perf_stat(args, &key, pid);
+                }
+                if perf_record_enabled(args) {
+                    start_server_perf_record(args, &key, pid);
+                }
+            }
+            None => eprintln!("    warning: failed to determine server PID for perf capture"),
         }
     }
 
@@ -941,7 +1103,7 @@ fn generate_report(results: &BTreeMap<String, Value>, args: &Args) {
          Duration: {}s | Warmup: {}s\n\
          Spinr mode: {}\n\
          OS monitors: {}\n\
-         Perf stat: {}\n\
+         Perf: {}\n\
          Date: {now}\n\
          \n\
          ## Runs\n\
@@ -1163,7 +1325,7 @@ fn preflight_checks(args: &Args) {
         }
     }
 
-    if args.perf_stat {
+    if args.perf_enabled {
         let out = ssh_run(
             &args.ssh_user,
             &args.server_ssh,
@@ -1222,7 +1384,7 @@ fn main() {
     println!(" Duration: {}s  Warmup: {}s", args.duration, args.warmup);
     println!(" Spinr mode: {}", args.spinr_mode.as_str());
     println!(" OS monitors: {}", args.os_monitors);
-    println!(" Perf stat: {}", perf_scope_label(&args));
+    println!(" Perf: {}", perf_scope_label(&args));
     println!(
         " Test cases: {}",
         args.test_cases

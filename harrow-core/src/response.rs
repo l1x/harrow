@@ -1,4 +1,6 @@
-use bytes::Bytes;
+use std::borrow::Cow;
+
+use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use http::StatusCode;
 use http_body_util::combinators::BoxBody;
@@ -54,8 +56,7 @@ impl Response {
     }
 
     /// 200 OK with a text body.
-    pub fn text(body: impl Into<String>) -> Self {
-        let body: String = body.into();
+    pub fn text(body: impl Into<Bytes>) -> Self {
         let mut resp = Self::new(StatusCode::OK, body);
         resp.set_header_static(
             http::header::CONTENT_TYPE,
@@ -142,7 +143,7 @@ impl Response {
 }
 
 /// Trait for types that can be converted into a `Response`.
-/// Implement this on your error types to enable `Result<Response, E>` handlers.
+/// Implement this on your own types to allow plain-value and `Result<T, E>` handlers.
 pub trait IntoResponse {
     fn into_response(self) -> Response;
 }
@@ -153,10 +154,81 @@ impl IntoResponse for Response {
     }
 }
 
-impl<E: IntoResponse> IntoResponse for Result<Response, E> {
+impl IntoResponse for &'static str {
+    fn into_response(self) -> Response {
+        Response::text(self)
+    }
+}
+
+impl IntoResponse for String {
+    fn into_response(self) -> Response {
+        Response::text(self)
+    }
+}
+
+impl IntoResponse for Box<str> {
+    fn into_response(self) -> Response {
+        String::from(self).into_response()
+    }
+}
+
+impl IntoResponse for Cow<'static, str> {
     fn into_response(self) -> Response {
         match self {
-            Ok(r) => r,
+            Cow::Borrowed(s) => Response::text(s),
+            Cow::Owned(s) => Response::text(s),
+        }
+    }
+}
+
+impl IntoResponse for &'static [u8] {
+    fn into_response(self) -> Response {
+        Bytes::from_static(self).into_response()
+    }
+}
+
+impl IntoResponse for Vec<u8> {
+    fn into_response(self) -> Response {
+        Bytes::from(self).into_response()
+    }
+}
+
+impl IntoResponse for Cow<'static, [u8]> {
+    fn into_response(self) -> Response {
+        match self {
+            Cow::Borrowed(bytes) => Bytes::from_static(bytes).into_response(),
+            Cow::Owned(bytes) => Bytes::from(bytes).into_response(),
+        }
+    }
+}
+
+impl IntoResponse for Bytes {
+    fn into_response(self) -> Response {
+        let mut resp = Response::new(StatusCode::OK, self);
+        resp.set_header_static(
+            http::header::CONTENT_TYPE,
+            http::header::HeaderValue::from_static("application/octet-stream"),
+        );
+        resp
+    }
+}
+
+impl IntoResponse for BytesMut {
+    fn into_response(self) -> Response {
+        self.freeze().into_response()
+    }
+}
+
+impl IntoResponse for () {
+    fn into_response(self) -> Response {
+        Response::ok()
+    }
+}
+
+impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {
+    fn into_response(self) -> Response {
+        match self {
+            Ok(r) => r.into_response(),
             Err(e) => e.into_response(),
         }
     }
@@ -275,9 +347,40 @@ mod tests {
         assert_eq!(resp.status_code(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn into_response_static_str_sets_text_plain() {
+        let resp = "ok".into_response();
+        let inner = resp.into_inner();
+        assert_eq!(
+            inner.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        let body = inner.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from("ok"));
+    }
+
+    #[tokio::test]
+    async fn into_response_bytes_sets_octet_stream() {
+        let resp = Bytes::from_static(b"ok").into_response();
+        let inner = resp.into_inner();
+        assert_eq!(
+            inner.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        let body = inner.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from_static(b"ok"));
+    }
+
     #[test]
     fn into_response_result_ok() {
         let result: Result<Response, Response> = Ok(Response::text("ok"));
+        let resp = result.into_response();
+        assert_eq!(resp.status_code(), StatusCode::OK);
+    }
+
+    #[test]
+    fn into_response_result_plain_ok() {
+        let result: Result<&'static str, Response> = Ok("ok");
         let resp = result.into_response();
         assert_eq!(resp.status_code(), StatusCode::OK);
     }

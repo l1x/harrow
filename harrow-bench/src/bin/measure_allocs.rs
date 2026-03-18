@@ -138,11 +138,11 @@ fn measure_sync<F: Fn()>(f: F) -> AllocResult {
     }
 }
 
-/// Measure allocations for an async closure using a single-threaded runtime.
-fn measure_async<F, Fut>(f: F) -> AllocResult
+/// Measure allocations for a TCP benchmark using a real listener and keep-alive client.
+fn measure_tcp<F, Fut>(setup: F, path: &str, expected_status: u16) -> AllocResult
 where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::net::SocketAddr>,
 {
     // Build the runtime with tracking disabled so its allocations don't count.
     disable_tracking();
@@ -151,10 +151,13 @@ where
         .build()
         .unwrap();
 
-    // Warmup
+    let addr = rt.block_on(setup());
+    let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
+
     rt.block_on(async {
         for _ in 0..100 {
-            f().await;
+            let (status, _) = client.get(path).await;
+            debug_assert_eq!(status, expected_status);
         }
     });
 
@@ -162,7 +165,8 @@ where
     enable_tracking();
     rt.block_on(async {
         for _ in 0..ITERATIONS {
-            f().await;
+            let (status, _) = client.get(path).await;
+            debug_assert_eq!(status, expected_status);
         }
     });
     disable_tracking();
@@ -237,17 +241,16 @@ fn main() {
     );
     results.insert("route_lookup_100".into(), r);
 
-    // -- Client-based benchmarks (async, no TCP) --
+    // -- TCP benchmarks (real listener + BenchClient), matched to criterion --
 
     // echo_text
-    let client = App::new().get("/echo", harrow_bench::text_handler).client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/echo").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/echo", harrow_bench::text_handler)).await
+        },
+        "/echo",
+        200,
+    );
     println!(
         "  echo_text: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -255,14 +258,13 @@ fn main() {
     results.insert("echo_text".into(), r);
 
     // echo_json
-    let client = App::new().get("/echo", harrow_bench::json_handler).client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/echo").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/echo", harrow_bench::json_handler)).await
+        },
+        "/echo",
+        200,
+    );
     println!(
         "  echo_json: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -270,16 +272,14 @@ fn main() {
     results.insert("echo_json".into(), r);
 
     // echo_json_1kb
-    let client = App::new()
-        .get("/echo", harrow_bench::json_1kb_handler)
-        .client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/echo").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/echo", harrow_bench::json_1kb_handler))
+                .await
+        },
+        "/echo",
+        200,
+    );
     println!(
         "  echo_json_1kb: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -287,16 +287,14 @@ fn main() {
     results.insert("echo_json_1kb".into(), r);
 
     // echo_json_10kb
-    let client = App::new()
-        .get("/echo", harrow_bench::json_10kb_handler)
-        .client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/echo").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/echo", harrow_bench::json_10kb_handler))
+                .await
+        },
+        "/echo",
+        200,
+    );
     println!(
         "  echo_json_10kb: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -304,16 +302,14 @@ fn main() {
     results.insert("echo_json_10kb".into(), r);
 
     // echo_param
-    let client = App::new()
-        .get("/users/:id", harrow_bench::text_handler)
-        .client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/users/42").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/users/:id", harrow_bench::text_handler))
+                .await
+        },
+        "/users/42",
+        200,
+    );
     println!(
         "  echo_param: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -321,14 +317,13 @@ fn main() {
     results.insert("echo_param".into(), r);
 
     // echo_404
-    let client = App::new().get("/echo", harrow_bench::text_handler).client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/nope").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            harrow_bench::start_server(App::new().get("/echo", harrow_bench::text_handler)).await
+        },
+        "/nope",
+        404,
+    );
     println!(
         "  echo_404: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -336,38 +331,51 @@ fn main() {
     results.insert("echo_404".into(), r);
 
     // full_json_3mw
-    let counter = std::sync::Arc::new(harrow_bench::HitCounter(
-        std::sync::atomic::AtomicUsize::new(0),
-    ));
-    let client = App::new()
-        .state(counter)
-        .middleware(harrow_bench::timing_middleware)
-        .middleware(harrow_bench::header_middleware)
-        .middleware(harrow_bench::noop_middleware)
-        .get("/users/:id", harrow_bench::param_state_handler)
-        .get("/health", harrow_bench::text_handler)
-        .client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/users/42").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            let counter = std::sync::Arc::new(harrow_bench::HitCounter(
+                std::sync::atomic::AtomicUsize::new(0),
+            ));
+            harrow_bench::start_server(
+                App::new()
+                    .state(counter)
+                    .middleware(harrow_bench::timing_middleware)
+                    .middleware(harrow_bench::header_middleware)
+                    .middleware(harrow_bench::noop_middleware)
+                    .get("/users/:id", harrow_bench::param_state_handler)
+                    .get("/health", harrow_bench::text_handler),
+            )
+            .await
+        },
+        "/users/42",
+        200,
+    );
     println!(
         "  full_json_3mw: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
     );
     results.insert("full_json_3mw".into(), r);
 
-    // full_health_3mw (same server, /health route)
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/health").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    // full_health_3mw
+    let r = measure_tcp(
+        || async {
+            let counter = std::sync::Arc::new(harrow_bench::HitCounter(
+                std::sync::atomic::AtomicUsize::new(0),
+            ));
+            harrow_bench::start_server(
+                App::new()
+                    .state(counter)
+                    .middleware(harrow_bench::timing_middleware)
+                    .middleware(harrow_bench::header_middleware)
+                    .middleware(harrow_bench::noop_middleware)
+                    .get("/users/:id", harrow_bench::param_state_handler)
+                    .get("/health", harrow_bench::text_handler),
+            )
+            .await
+        },
+        "/health",
+        200,
+    );
     println!(
         "  full_health_3mw: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -375,18 +383,17 @@ fn main() {
     results.insert("full_health_3mw".into(), r);
 
     // mw_depth_10
-    let mut app = App::new();
-    for _ in 0..10 {
-        app = app.middleware(harrow_bench::noop_middleware);
-    }
-    let client = app.get("/echo", harrow_bench::text_handler).client();
-    let r = measure_async(|| {
-        let client = &client;
-        async move {
-            let resp = client.get("/echo").await;
-            debug_assert_eq!(resp.status(), http::StatusCode::OK);
-        }
-    });
+    let r = measure_tcp(
+        || async {
+            let mut app = App::new();
+            for _ in 0..10 {
+                app = app.middleware(harrow_bench::noop_middleware);
+            }
+            harrow_bench::start_server(app.get("/echo", harrow_bench::text_handler)).await
+        },
+        "/echo",
+        200,
+    );
     println!(
         "  mw_depth_10: {} bytes, {} allocs per op",
         r.bytes_per_op, r.count_per_op
@@ -402,43 +409,18 @@ fn main() {
     {
         use axum::{Router, routing::get};
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(|| async { "ok" }));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        // Warmup
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/echo").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/echo").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/echo", get(|| async { "ok" }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/echo",
+            200,
+        );
         println!(
             "  echo_text: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
@@ -455,42 +437,18 @@ fn main() {
             Json(json!({"status": "ok", "code": 200}))
         }
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(json_handler));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/echo").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/echo").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/echo", get(json_handler));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/echo",
+            200,
+        );
         println!(
             "  echo_json: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
@@ -507,42 +465,18 @@ fn main() {
             Json(harrow_bench::JSON_1KB.clone())
         }
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(json_1kb_handler));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/echo").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/echo").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/echo", get(json_1kb_handler));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/echo",
+            200,
+        );
         println!(
             "  echo_json_1kb: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
@@ -559,42 +493,18 @@ fn main() {
             Json(harrow_bench::JSON_10KB.clone())
         }
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(json_10kb_handler));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/echo").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/echo").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/echo", get(json_10kb_handler));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/echo",
+            200,
+        );
         println!(
             "  echo_json_10kb: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
@@ -610,42 +520,18 @@ fn main() {
             "ok"
         }
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/users/{id}", get(param_handler));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/users/42").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/users/42").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/users/{id}", get(param_handler));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/users/42",
+            200,
+        );
         println!(
             "  echo_param: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
@@ -657,42 +543,18 @@ fn main() {
     {
         use axum::{Router, routing::get};
 
-        disable_tracking();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(|| async { "ok" }));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            addr
-        });
-
-        let mut client = rt.block_on(harrow_bench::BenchClient::connect(addr));
-
-        rt.block_on(async {
-            for _ in 0..100 {
-                let _ = client.get("/nope").await;
-            }
-        });
-
-        reset_tracking();
-        enable_tracking();
-        rt.block_on(async {
-            for _ in 0..ITERATIONS {
-                let _ = client.get("/nope").await;
-            }
-        });
-        disable_tracking();
-        let (bytes, count) = snapshot();
-        let r = AllocResult {
-            bytes_per_op: bytes / ITERATIONS,
-            count_per_op: count / ITERATIONS,
-        };
+        let r = measure_tcp(
+            || async {
+                let app = Router::new().route("/echo", get(|| async { "ok" }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                addr
+            },
+            "/nope",
+            404,
+        );
         println!(
             "  echo_404: {} bytes, {} allocs per op",
             r.bytes_per_op, r.count_per_op
