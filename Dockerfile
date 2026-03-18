@@ -12,6 +12,18 @@ COPY harrow-serde/Cargo.toml harrow-serde/Cargo.toml
 COPY harrow-server/Cargo.toml harrow-server/Cargo.toml
 COPY harrow-bench/Cargo.toml harrow-bench/Cargo.toml
 
+# Cargo needs target entrypoints present to resolve the workspace during fetch.
+COPY harrow/examples harrow/examples
+COPY harrow/src/lib.rs harrow/src/lib.rs
+COPY harrow-core/src/lib.rs harrow-core/src/lib.rs
+COPY harrow-middleware/src/lib.rs harrow-middleware/src/lib.rs
+COPY harrow-o11y/src/lib.rs harrow-o11y/src/lib.rs
+COPY harrow-serde/src/lib.rs harrow-serde/src/lib.rs
+COPY harrow-server/src/lib.rs harrow-server/src/lib.rs
+COPY harrow-bench/benches harrow-bench/benches
+COPY harrow-bench/src/lib.rs harrow-bench/src/lib.rs
+COPY harrow-bench/src/bin harrow-bench/src/bin
+
 RUN rustup target add aarch64-unknown-linux-gnu && \
     cargo fetch --locked --target=aarch64-unknown-linux-gnu
 

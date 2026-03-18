@@ -7,6 +7,8 @@
 
 !harrow/
 !harrow/Cargo.toml
+!harrow/examples/
+!harrow/examples/**
 !harrow/src/
 !harrow/src/**
 
@@ -36,6 +38,8 @@
 !harrow-server/src/**
 
 !harrow-bench/
+!harrow-bench/benches/
+!harrow-bench/benches/**
 !harrow-bench/Cargo.toml
 !harrow-bench/src/
 !harrow-bench/src/**
