@@ -816,10 +816,8 @@ fn prepare_remote_perf_symfs(
             let framework = framework?;
             format!(
                 "sh -lc 'rm -rf {symfs_dir}; mkdir -p {symfs_dir}; \
-                 cid=$(docker create {}); \
-                 docker cp \"$cid\":{} {symfs_dir}/{} >/dev/null; \
-                 docker rm \"$cid\" >/dev/null'",
-                framework.image(),
+                 docker cp {}:{} {symfs_dir}/{} >/dev/null'",
+                framework.container_name(),
                 framework.binary_path(),
                 framework.binary_name()
             )
