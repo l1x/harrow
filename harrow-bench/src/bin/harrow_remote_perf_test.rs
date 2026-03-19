@@ -194,6 +194,20 @@ impl Framework {
             Self::Axum => format!("/axum-perf-server --bind 0.0.0.0 --port {port}"),
         }
     }
+
+    fn binary_name(self) -> &'static str {
+        match self {
+            Self::Harrow => "harrow-perf-server",
+            Self::Axum => "axum-perf-server",
+        }
+    }
+
+    fn binary_path(self) -> &'static str {
+        match self {
+            Self::Harrow => "/harrow-perf-server",
+            Self::Axum => "/axum-perf-server",
+        }
+    }
 }
 
 struct Args {
@@ -548,6 +562,10 @@ fn remote_artifact_path(key: &str, side: RemoteSide, suffix: &str) -> String {
     format!("/tmp/{key}.{}.{}", side.label(), suffix)
 }
 
+fn remote_perf_symfs_dir(key: &str, side: RemoteSide) -> String {
+    format!("/tmp/{key}.{}.perf-symfs", side.label())
+}
+
 fn pull_remote_file(
     args: &Args,
     side: RemoteSide,
@@ -576,8 +594,19 @@ fn pull_remote_file(
     }
 }
 
+fn remote_file_exists(args: &Args, side: RemoteSide, remote_path: &str) -> bool {
+    matches!(
+        ssh_side(args, side, &format!("test -f {remote_path} && echo ok")),
+        Ok(o) if o.status.success()
+    )
+}
+
 fn cleanup_remote_file(args: &Args, side: RemoteSide, remote_path: &str) {
     let _ = ssh_side(args, side, &format!("rm -f {remote_path}"));
+}
+
+fn cleanup_remote_dir(args: &Args, side: RemoteSide, remote_path: &str) {
+    let _ = ssh_side(args, side, &format!("rm -rf {remote_path}"));
 }
 
 fn start_remote_capture(args: &Args, side: RemoteSide, shell_cmd: &str) {
@@ -589,6 +618,17 @@ fn start_remote_capture(args: &Args, side: RemoteSide, shell_cmd: &str) {
             side.label()
         );
     }
+}
+
+fn inferno_available(args: &Args, side: RemoteSide) -> bool {
+    matches!(
+        ssh_side(
+            args,
+            side,
+            "command -v inferno-collapse-perf >/dev/null && command -v inferno-flamegraph >/dev/null && echo ok",
+        ),
+        Ok(o) if o.status.success()
+    )
 }
 
 fn container_pid(args: &Args, framework: Framework) -> Option<u32> {
@@ -764,6 +804,113 @@ fn start_server_perf_record(args: &Args, key: &str, server_pid: u32) {
     start_remote_capture(args, RemoteSide::Server, &cmd);
 }
 
+fn prepare_remote_perf_symfs(
+    args: &Args,
+    side: RemoteSide,
+    key: &str,
+    framework: Option<Framework>,
+) -> Option<String> {
+    let symfs_dir = remote_perf_symfs_dir(key, side);
+    let remote_cmd = match side {
+        RemoteSide::Server => {
+            let framework = framework?;
+            format!(
+                "sh -lc 'rm -rf {symfs_dir}; mkdir -p {symfs_dir}; \
+                 cid=$(docker create {}); \
+                 docker cp \"$cid\":{} {symfs_dir}/{} >/dev/null; \
+                 docker rm \"$cid\" >/dev/null'",
+                framework.image(),
+                framework.binary_path(),
+                framework.binary_name()
+            )
+        }
+        RemoteSide::Client => format!(
+            "sh -lc 'rm -rf {symfs_dir}; mkdir -p {symfs_dir}; cp {DEFAULT_SPINR_BIN} {symfs_dir}/spinr'"
+        ),
+    };
+
+    match ssh_side(args, side, &remote_cmd) {
+        Ok(o) if o.status.success() => Some(symfs_dir),
+        Ok(o) => {
+            eprintln!(
+                "    warning: failed to prepare perf symfs on {}: {}",
+                side.label(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "    warning: failed to prepare perf symfs on {}: {e}",
+                side.label()
+            );
+            None
+        }
+    }
+}
+
+fn postprocess_remote_perf_record(
+    args: &Args,
+    side: RemoteSide,
+    key: &str,
+    symfs_dir: &str,
+) {
+    let perf_path = remote_artifact_path(key, side, "perf.data");
+    let report_path = remote_artifact_path(key, side, "perf-report.txt");
+    let report_cmd = format!(
+        "sh -lc 'doas perf report --stdio --call-graph graph,caller \
+         -i {perf_path} --symfs {symfs_dir} > {report_path}; \
+         status=$?; if test -f {report_path}; then chmod 0644 {report_path}; fi; exit $status'"
+    );
+
+    match ssh_side(args, side, &report_cmd) {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!(
+                "    warning: failed to generate perf report on {}: {}",
+                side.label(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => eprintln!(
+            "    warning: failed to generate perf report on {}: {e}",
+            side.label()
+        ),
+    }
+
+    if !inferno_available(args, side) {
+        eprintln!(
+            "    warning: inferno tools missing on {}; skipping flamegraph generation",
+            side.label()
+        );
+        return;
+    }
+
+    let folded_path = remote_artifact_path(key, side, "perf.folded");
+    let svg_path = remote_artifact_path(key, side, "perf.svg");
+    let flamegraph_cmd = format!(
+        "sh -lc 'set -e; \
+         doas perf script -i {perf_path} --symfs {symfs_dir} | inferno-collapse-perf > {folded_path}; \
+         inferno-flamegraph < {folded_path} > {svg_path}; \
+         chmod 0644 {folded_path} {svg_path}'"
+    );
+
+    match ssh_side(args, side, &flamegraph_cmd) {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!(
+                "    warning: failed to generate flamegraph on {}: {}",
+                side.label(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => eprintln!(
+            "    warning: failed to generate flamegraph on {}: {e}",
+            side.label()
+        ),
+    }
+}
+
 fn host_spinr_perf_cmd(args: &Args, key: &str, spinr_cmd: &str) -> String {
     let spinr_stdout_path = remote_artifact_path(key, RemoteSide::Client, "spinr-stdout.json");
     let spinr_stderr_path = remote_artifact_path(key, RemoteSide::Client, "spinr-stderr.txt");
@@ -815,7 +962,7 @@ fn host_spinr_perf_cmd(args: &Args, key: &str, spinr_cmd: &str) -> String {
     script
 }
 
-fn collect_run_artifacts(args: &Args, key: &str) {
+fn collect_run_artifacts(args: &Args, framework: Framework, key: &str) {
     if args.os_monitors {
         for suffix in [
             "vmstat.txt",
@@ -875,12 +1022,48 @@ fn collect_run_artifacts(args: &Args, key: &str) {
             }
 
             if perf_record_enabled(args) {
-                let remote_path = remote_artifact_path(key, side, "perf.data");
-                let local_path = args
-                    .results_dir
-                    .join(format!("{key}.{}.perf.data", side.label()));
-                pull_remote_file(args, side, &remote_path, &local_path);
-                cleanup_remote_file(args, side, &remote_path);
+                let symfs_dir = prepare_remote_perf_symfs(
+                    args,
+                    side,
+                    key,
+                    if side == RemoteSide::Server {
+                        Some(framework)
+                    } else {
+                        None
+                    },
+                );
+
+                if let Some(symfs_dir) = symfs_dir.as_deref() {
+                    postprocess_remote_perf_record(args, side, key, symfs_dir);
+                }
+
+                let report_remote = remote_artifact_path(key, side, "perf-report.txt");
+                if remote_file_exists(args, side, &report_remote) {
+                    let report_local = args
+                        .results_dir
+                        .join(format!("{key}.{}.perf-report.txt", side.label()));
+                    pull_remote_file(args, side, &report_remote, &report_local);
+                }
+
+                let folded_remote = remote_artifact_path(key, side, "perf.folded");
+                if remote_file_exists(args, side, &folded_remote) {
+                    let folded_local = args
+                        .results_dir
+                        .join(format!("{key}.{}.perf.folded", side.label()));
+                    pull_remote_file(args, side, &folded_remote, &folded_local);
+                }
+
+                let svg_remote = remote_artifact_path(key, side, "perf.svg");
+                if remote_file_exists(args, side, &svg_remote) {
+                    let svg_local = args
+                        .results_dir
+                        .join(format!("{key}.{}.perf.svg", side.label()));
+                    pull_remote_file(args, side, &svg_remote, &svg_local);
+                }
+
+                if let Some(symfs_dir) = symfs_dir.as_deref() {
+                    cleanup_remote_dir(args, side, symfs_dir);
+                }
             }
         }
     }
@@ -910,6 +1093,12 @@ fn write_run_meta(
         "perf_mode": args.perf_mode.as_str(),
         "perf_stat": perf_stat_enabled(args),
         "perf_record": perf_record_enabled(args),
+        "server_perf_record_remote_path": remote_artifact_path(key, RemoteSide::Server, "perf.data"),
+        "client_perf_record_remote_path": if client_perf_enabled(args) {
+            Some(remote_artifact_path(key, RemoteSide::Client, "perf.data"))
+        } else {
+            None
+        },
         "server_perf_stat": perf_stat_enabled(args),
         "server_perf_record": perf_record_enabled(args),
         "client_perf_stat": perf_stat_enabled(args) && client_perf_enabled(args),
@@ -1044,7 +1233,7 @@ fn run_test_case(
         thread::sleep(Duration::from_secs(MONITOR_MARGIN_SECS as u64));
     }
 
-    collect_run_artifacts(args, &key);
+    collect_run_artifacts(args, framework, &key);
     write_run_meta(
         args,
         &key,
@@ -1360,6 +1549,22 @@ fn preflight_checks(args: &Args) {
             }
         } else {
             println!("  perf on client: skipped (spinr-mode=docker)");
+        }
+
+        if perf_record_enabled(args) {
+            for side in [RemoteSide::Server, RemoteSide::Client] {
+                if side == RemoteSide::Client && !client_perf_enabled(args) {
+                    continue;
+                }
+                if inferno_available(args, side) {
+                    println!("  inferno tools on {}: ok", side.label());
+                } else {
+                    eprintln!(
+                        "  WARNING: inferno tools on {}: MISSING — runner will keep raw perf.data on the node and only collect perf-report.txt",
+                        side.label()
+                    );
+                }
+            }
         }
     }
 
