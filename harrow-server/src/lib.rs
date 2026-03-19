@@ -18,10 +18,12 @@ use harrow_core::route::{App, RouteTable};
 pub struct ServerConfig {
     /// Maximum number of concurrent connections. Default: 8192.
     pub max_connections: usize,
-    /// Timeout for reading HTTP headers from a new connection. Default: 5s.
-    pub header_read_timeout: Duration,
-    /// Maximum lifetime of a single connection. Default: 5 min.
-    pub connection_timeout: Duration,
+    /// Timeout for reading HTTP headers from a new connection. Default: Some(5s).
+    /// Set to `None` to disable (eliminates per-connection timer overhead).
+    pub header_read_timeout: Option<Duration>,
+    /// Maximum lifetime of a single connection. Default: Some(5 min).
+    /// Set to `None` to disable (eliminates per-connection timer overhead).
+    pub connection_timeout: Option<Duration>,
     /// Time to wait for in-flight requests to complete during shutdown. Default: 30s.
     pub drain_timeout: Duration,
 }
@@ -30,8 +32,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             max_connections: 8192,
-            header_read_timeout: Duration::from_secs(5),
-            connection_timeout: Duration::from_secs(300),
+            header_read_timeout: Some(Duration::from_secs(5)),
+            connection_timeout: Some(Duration::from_secs(300)),
             drain_timeout: Duration::from_secs(30),
         }
     }
@@ -125,15 +127,21 @@ pub async fn serve_with_config(
                     let mut builder = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
                     );
-                    builder.http1()
-                        .timer(hyper_util::rt::TokioTimer::new())
-                        .header_read_timeout(header_read_timeout);
+                    if let Some(hrt) = header_read_timeout {
+                        builder.http1()
+                            .timer(hyper_util::rt::TokioTimer::new())
+                            .header_read_timeout(hrt);
+                    }
                     let conn = builder.serve_connection(io, service);
 
-                    match tokio::time::timeout(connection_timeout, conn).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::error!("connection error: {e}"),
-                        Err(_) => tracing::warn!("connection timed out"),
+                    if let Some(ct) = connection_timeout {
+                        match tokio::time::timeout(ct, conn).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::error!("connection error: {e}"),
+                            Err(_) => tracing::warn!("connection timed out"),
+                        }
+                    } else if let Err(e) = conn.await {
+                        tracing::error!("connection error: {e}");
                     }
                 });
             }

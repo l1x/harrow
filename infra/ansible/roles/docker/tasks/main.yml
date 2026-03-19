@@ -1,0 +1,48 @@
+- name: Enable Docker at boot
+  become: true
+  ansible.builtin.command: rc-update add docker default
+  changed_when: false
+
+- name: Start Docker
+  become: true
+  ansible.builtin.command: rc-service docker start
+  changed_when: false
+
+- name: Add alpine user to docker group
+  become: true
+  ansible.builtin.user:
+    name: alpine
+    groups: docker
+    append: true
+
+- name: Reset connection for group membership
+  ansible.builtin.meta: reset_connection
+
+- name: Create Docker config directory
+  become: true
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: "0755"
+
+- name: Configure Docker daemon
+  become: true
+  ansible.builtin.copy:
+    content: |
+      {
+        "default-ulimits": {
+          "nofile": { "Name": "nofile", "Hard": 32000, "Soft": 32000 }
+        },
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+
+- name: Restart Docker with new config
+  become: true
+  ansible.builtin.command: rc-service docker restart
+  changed_when: true

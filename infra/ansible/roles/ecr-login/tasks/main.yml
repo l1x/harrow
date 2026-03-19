@@ -1,0 +1,5 @@
+- name: ECR login
+  ansible.builtin.shell: |
+    aws ecr get-login-password --region {{ aws_region | default('eu-west-1') }} \
+      | docker login --username AWS --password-stdin {{ ecr_registry }}
+  changed_when: true

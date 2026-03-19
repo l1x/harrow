@@ -849,12 +849,7 @@ fn prepare_remote_perf_symfs(
     }
 }
 
-fn postprocess_remote_perf_record(
-    args: &Args,
-    side: RemoteSide,
-    key: &str,
-    symfs_dir: &str,
-) {
+fn postprocess_remote_perf_record(args: &Args, side: RemoteSide, key: &str, symfs_dir: &str) {
     let perf_path = remote_artifact_path(key, side, "perf.data");
     let report_path = remote_artifact_path(key, side, "perf-report.txt");
     let report_stderr_path = remote_artifact_path(key, side, "perf-report.stderr.txt");

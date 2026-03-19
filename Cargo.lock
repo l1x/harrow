@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "harrow"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "harrow-core",
  "harrow-middleware",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-bench"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "bytes",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "futures-util",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-middleware"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "brotli",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-o11y"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "harrow-core",
  "rolly",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-serde"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "futures-util",

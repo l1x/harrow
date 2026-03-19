@@ -5,4 +5,8 @@
     aws_region: "eu-west-1"
   roles:
     - role: os
-    - role: bench
+    - role: packages
+    - role: docker
+    - role: ecr-login
+    - role: pull-images
+    - role: vector

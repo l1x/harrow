@@ -1,0 +1,12 @@
+- name: Copy vector.toml config
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../vector/vector.toml"
+    dest: ~/vector.toml
+    mode: "0644"
+  when: inventory_hostname in groups['client']
+
+- name: Pull Vector image
+  ansible.builtin.command:
+    cmd: docker pull timberio/vector:latest-alpine
+  changed_when: true
+  when: inventory_hostname in groups['client']

@@ -133,6 +133,11 @@ docker tag axum-perf-server:perf-arm64 $ECR/harrow/axum-perf-server:latest && do
 docker tag spinr:latest $ECR/harrow/spinr:latest && docker push $ECR/harrow/spinr:latest
 """
 
+[tasks."bench:pull-images"]
+description = "Pull latest bench images from ECR on all instances"
+dir = "infra/ansible"
+run = "ansible-playbook playbooks/pull-images.yml"
+
 [tasks."bench:setup-linux"]
 description = "Provision bench EC2 instances via Ansible"
 dir = "infra/ansible"
