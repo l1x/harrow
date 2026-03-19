@@ -36,6 +36,16 @@ Date: 2026-03-19 07:45:18 UTC
 | axum_text_c128 | 7.2% / 10.0% / 0.0% / 82.8% | 3.7% / 17.7% / 0.0% / 78.5% | 105.5 / 157.8 MB/s · retrans 0.00/s | 155.1 / 125.0 MB/s · retrans 0.00/s | 4.01% hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T>::poll_loop (axum-perf-server) |
 | harrow_text_c128 | 8.5% / 11.4% / 0.0% / 80.1% | 2.1% / 8.7% / 0.0% / 89.2% | 52.0 / 77.8 MB/s · retrans 0.00/s | 76.6 / 61.7 MB/s · retrans 0.00/s | 5.03% parking_lot_core::word_lock::WordLock::lock_slow (harrow-perf-server) |
 
+## Telemetry Charts
+
+### json-1kb-c128
+
+![json-1kb-c128 telemetry](./json-1kb-c128.server.telemetry.svg)
+
+### text-c128
+
+![text-c128 telemetry](./text-c128.server.telemetry.svg)
+
 ## Artifacts
 
 | Run | JSON | Perf Report | Perf Script | Perf SVG | Server CPU | Server Net | Client CPU | Client Net |

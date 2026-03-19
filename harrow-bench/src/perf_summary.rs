@@ -49,6 +49,15 @@ struct NetSummary {
     retrans_s: f64,
 }
 
+#[derive(Clone, Default)]
+struct TelemetrySeries {
+    cpu_busy_pct: Vec<f64>,
+    net_tx_mb_s: Vec<f64>,
+    retrans_s: Vec<f64>,
+    run_queue: Vec<f64>,
+    context_switches_s: Vec<f64>,
+}
+
 #[derive(Clone)]
 struct PerfHotspot {
     pct: f64,
@@ -64,6 +73,7 @@ struct RunSummary {
     client_cpu: Option<CpuSummary>,
     server_net: Option<NetSummary>,
     client_net: Option<NetSummary>,
+    telemetry: TelemetrySeries,
     perf_hotspots: Vec<PerfHotspot>,
 }
 
@@ -82,9 +92,21 @@ struct ReportSummary {
     runs: Vec<RunSummary>,
 }
 
+const CANVAS: &str = "#fafafa";
+const SURFACE: &str = "#ffffff";
+const BORDER_LIGHT: &str = "#e2e8f0";
+const TEXT_PRIMARY: &str = "#1e293b";
+const TEXT_SECONDARY: &str = "#64748b";
+const TEXT_MUTED: &str = "#94a3b8";
+const ACCENT_ORANGE: &str = "#ea580c";
+const AXUM_GRAY: &str = "#64748b";
+const HARROW_FILL: &str = "#fff7ed";
+const AXUM_FILL: &str = "#f8fafc";
+
 pub fn render_results_dir(results_dir: &Path) -> io::Result<()> {
     let summary = load_results_dir(results_dir)?;
     generate_local_flamegraphs(results_dir, &summary.runs)?;
+    generate_telemetry_svgs(results_dir, &summary)?;
     let svg = render_svg(&summary);
     fs::write(results_dir.join("summary.svg"), svg)?;
     fs::write(results_dir.join("summary.md"), render_markdown(results_dir, &summary))?;
@@ -127,6 +149,11 @@ fn load_results_dir(results_dir: &Path) -> io::Result<ReportSummary> {
             client_cpu: parse_cpu_summary(&results_dir.join(format!("{key}.client.sar-u.txt"))),
             server_net: parse_net_summary(&results_dir.join(format!("{key}.server.sar-net.txt"))),
             client_net: parse_net_summary(&results_dir.join(format!("{key}.client.sar-net.txt"))),
+            telemetry: parse_telemetry_series(
+                &results_dir.join(format!("{key}.server.sar-u.txt")),
+                &results_dir.join(format!("{key}.server.sar-net.txt")),
+                &results_dir.join(format!("{key}.server.vmstat.txt")),
+            ),
             perf_hotspots: parse_perf_hotspots(
                 &results_dir.join(format!("{key}.server.perf-report.txt")),
             ),
@@ -256,6 +283,100 @@ fn parse_net_summary(path: &Path) -> Option<NetSummary> {
     } else {
         None
     }
+}
+
+fn parse_telemetry_series(cpu_path: &Path, net_path: &Path, vmstat_path: &Path) -> TelemetrySeries {
+    let mut series = TelemetrySeries::default();
+    series.cpu_busy_pct = parse_cpu_busy_series(cpu_path);
+    let (net_tx_mb_s, retrans_s) = parse_net_series(net_path);
+    series.net_tx_mb_s = net_tx_mb_s;
+    series.retrans_s = retrans_s;
+    let (run_queue, context_switches_s) = parse_vmstat_series(vmstat_path);
+    series.run_queue = run_queue;
+    series.context_switches_s = context_switches_s;
+    series
+}
+
+fn parse_cpu_busy_series(path: &Path) -> Vec<f64> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() >= 8 && tokens[1] == "all" && tokens[0] != "Average:" {
+            out.push(parse_f64(tokens[2]) + parse_f64(tokens[4]) + parse_f64(tokens[5]));
+        }
+    }
+    out
+}
+
+fn parse_net_series(path: &Path) -> (Vec<f64>, Vec<f64>) {
+    enum Section {
+        None,
+        Iface,
+        TcpErr,
+    }
+
+    let Ok(text) = fs::read_to_string(path) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut section = Section::None;
+    let mut tx_mb_s = Vec::new();
+    let mut retrans_s = Vec::new();
+
+    for line in text.lines() {
+        if line.contains("IFACE") {
+            section = Section::Iface;
+            continue;
+        }
+        if line.contains("atmptf/s") {
+            section = Section::TcpErr;
+            continue;
+        }
+
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 || tokens[0] == "Average:" {
+            continue;
+        }
+
+        match section {
+            Section::Iface if tokens.len() >= 10 && tokens[1] == "eth0" => {
+                tx_mb_s.push(parse_f64(tokens[5]) / 1024.0);
+            }
+            Section::TcpErr if tokens.len() >= 6 => {
+                retrans_s.push(parse_f64(tokens[3]));
+            }
+            Section::None | Section::Iface | Section::TcpErr => {}
+        }
+    }
+
+    (tx_mb_s, retrans_s)
+}
+
+fn parse_vmstat_series(path: &Path) -> (Vec<f64>, Vec<f64>) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut run_queue = Vec::new();
+    let mut context_switches_s = Vec::new();
+
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 17 {
+            continue;
+        }
+        if tokens[0].parse::<f64>().is_err() {
+            continue;
+        }
+        run_queue.push(parse_f64(tokens[0]));
+        context_switches_s.push(parse_f64(tokens[11]));
+    }
+
+    (run_queue, context_switches_s)
 }
 
 fn parse_perf_hotspots(path: &Path) -> Vec<PerfHotspot> {
@@ -465,6 +586,29 @@ fn render_markdown(results_dir: &Path, summary: &ReportSummary) -> String {
     }
     writeln!(&mut out).unwrap();
 
+    let telemetry_runs: Vec<&str> = grouped_runs(&summary.runs)
+        .keys()
+        .copied()
+        .filter(|test_case| results_dir.join(telemetry_svg_filename(test_case)).exists())
+        .collect();
+
+    if !telemetry_runs.is_empty() {
+        writeln!(&mut out, "## Telemetry Charts").unwrap();
+        writeln!(&mut out).unwrap();
+        for test_case in telemetry_runs {
+            writeln!(&mut out, "### {}", test_case).unwrap();
+            writeln!(&mut out).unwrap();
+            writeln!(
+                &mut out,
+                "![{} telemetry](./{})",
+                test_case,
+                telemetry_svg_filename(test_case)
+            )
+            .unwrap();
+            writeln!(&mut out).unwrap();
+        }
+    }
+
     writeln!(&mut out, "## Artifacts").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -540,7 +684,7 @@ fn render_svg(summary: &ReportSummary) -> String {
     let width = 1400.0;
     let throughput_panel_height = 120.0 + (grouped_runs(&summary.runs).len() as f64 * 72.0);
     let p99_panel_height = throughput_panel_height;
-    let card_height = 232.0;
+    let card_height = 228.0;
     let card_gap = 20.0;
     let rows = summary.runs.len().div_ceil(2) as f64;
     let cards_height = rows * (card_height + card_gap);
@@ -552,38 +696,26 @@ fn render_svg(summary: &ReportSummary) -> String {
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{height:.0}" viewBox="0 0 {width:.0} {height:.0}" fill="none">"##
     )
     .unwrap();
-    svg.push_str(
-        r##"<defs>
-<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-<stop offset="0%" stop-color="#f7f6f2"/>
-<stop offset="100%" stop-color="#efe9de"/>
-</linearGradient>
-<linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
-<stop offset="0%" stop-color="#fffdf8"/>
-<stop offset="100%" stop-color="#f7f1e7"/>
-</linearGradient>
-</defs>"##,
-    );
     writeln!(
         &mut svg,
-        r##"<rect x="0" y="0" width="{width:.0}" height="{height:.0}" fill="url(#bg)"/>"##
+        r##"<rect x="0" y="0" width="{width:.0}" height="{height:.0}" fill="{CANVAS}"/>"##
     )
     .unwrap();
 
-    svg.push_str(&text(
+    svg.push_str(&mono_text(
         44.0,
         52.0,
-        30,
+        18,
         700,
-        "#1b1a17",
-        &format!("Run Dashboard · {}", summary.timestamp),
+        TEXT_PRIMARY,
+        &format!("run dashboard :: {}", summary.timestamp),
     ));
-    svg.push_str(&text(
+    svg.push_str(&ui_text(
         44.0,
         82.0,
-        15,
+        14,
         500,
-        "#5f5a52",
+        TEXT_SECONDARY,
         &format!(
             "{} · server {} · client {} · {}s run / {}s warmup · {}",
             summary.instance_type,
@@ -600,10 +732,36 @@ fn render_svg(summary: &ReportSummary) -> String {
     let panel_w = (width - 44.0 * 2.0 - panel_gap) / 2.0;
     let throughput_x = 44.0;
     let p99_x = throughput_x + panel_w + panel_gap;
-    svg.push_str(&panel_rect(throughput_x, panel_y, panel_w, throughput_panel_height));
-    svg.push_str(&panel_rect(p99_x, panel_y, panel_w, p99_panel_height));
-    svg.push_str(&text(throughput_x + 24.0, panel_y + 34.0, 22, 700, "#1b1a17", "Throughput"));
-    svg.push_str(&text(p99_x + 24.0, panel_y + 34.0, 22, 700, "#1b1a17", "P99 Latency"));
+    svg.push_str(&panel_card(
+        throughput_x,
+        panel_y,
+        panel_w,
+        throughput_panel_height,
+        ACCENT_ORANGE,
+    ));
+    svg.push_str(&panel_card(
+        p99_x,
+        panel_y,
+        panel_w,
+        p99_panel_height,
+        ACCENT_ORANGE,
+    ));
+    svg.push_str(&mono_text(
+        throughput_x + 24.0,
+        panel_y + 32.0,
+        18,
+        700,
+        ACCENT_ORANGE,
+        "throughput",
+    ));
+    svg.push_str(&mono_text(
+        p99_x + 24.0,
+        panel_y + 32.0,
+        18,
+        700,
+        ACCENT_ORANGE,
+        "p99 latency",
+    ));
 
     let grouped = grouped_runs(&summary.runs);
     let max_rps = summary
@@ -621,70 +779,72 @@ fn render_svg(summary: &ReportSummary) -> String {
 
     for (idx, (test_case, pair)) in grouped.iter().enumerate() {
         let base_y = panel_y + 72.0 + idx as f64 * 72.0;
-        svg.push_str(&text(
+        svg.push_str(&mono_text(
             throughput_x + 24.0,
             base_y,
-            16,
+            12,
             700,
-            "#3a342d",
+            TEXT_PRIMARY,
             test_case,
         ));
-        svg.push_str(&text(
+        svg.push_str(&mono_text(
             p99_x + 24.0,
             base_y,
-            16,
+            12,
             700,
-            "#3a342d",
+            TEXT_PRIMARY,
             test_case,
         ));
 
         let bars = [
-            ("harrow", "#cb5a3f", 0.0),
-            ("axum", "#1d8a7a", 26.0),
+            ("harrow", ACCENT_ORANGE, HARROW_FILL, 0.0),
+            ("axum", AXUM_GRAY, AXUM_FILL, 26.0),
         ];
 
-        for (framework, color, offset) in bars {
+        for (framework, color, fill, offset) in bars {
             if let Some(run) = pair.get(framework) {
                 let rps_w = ((run.metrics.rps / max_rps) * (panel_w - 210.0)).max(4.0);
                 let p99_w = ((run.metrics.p99 / max_p99) * (panel_w - 210.0)).max(4.0);
                 let y = base_y + 12.0 + offset;
-                svg.push_str(&text(
+                svg.push_str(&mono_text(
                     throughput_x + 24.0,
                     y + 14.0,
-                    13,
+                    12,
                     600,
                     color,
                     framework,
                 ));
-                svg.push_str(&text(p99_x + 24.0, y + 14.0, 13, 600, color, framework));
-                svg.push_str(&format!(
-                    r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="14" rx="7" fill="{}"/>"#,
+                svg.push_str(&mono_text(p99_x + 24.0, y + 14.0, 12, 600, color, framework));
+                svg.push_str(&metric_bar(
                     throughput_x + 92.0,
                     y,
                     rps_w,
-                    color
+                    14.0,
+                    color,
+                    fill,
                 ));
-                svg.push_str(&format!(
-                    r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="14" rx="7" fill="{}"/>"#,
+                svg.push_str(&metric_bar(
                     p99_x + 92.0,
                     y,
                     p99_w,
-                    color
+                    14.0,
+                    color,
+                    fill,
                 ));
-                svg.push_str(&text(
+                svg.push_str(&ui_text(
                     throughput_x + 100.0 + (panel_w - 210.0),
                     y + 13.0,
-                    13,
+                    10,
                     500,
-                    "#443d36",
+                    TEXT_SECONDARY,
                     &format!("{:.0} rps", run.metrics.rps),
                 ));
-                svg.push_str(&text(
+                svg.push_str(&ui_text(
                     p99_x + 100.0 + (panel_w - 210.0),
                     y + 13.0,
-                    13,
+                    10,
                     500,
-                    "#443d36",
+                    TEXT_SECONDARY,
                     &format!("{:.3} ms", run.metrics.p99),
                 ));
             }
@@ -698,27 +858,25 @@ fn render_svg(summary: &ReportSummary) -> String {
         let x = 44.0 + col * (panel_w + panel_gap);
         let y = cards_y + row * (card_height + card_gap);
         let accent = if run.meta.framework == "harrow" {
-            "#cb5a3f"
+            ACCENT_ORANGE
         } else {
-            "#1d8a7a"
+            AXUM_GRAY
         };
-        svg.push_str(&format!(
-            r#"<rect x="{x:.1}" y="{y:.1}" width="{panel_w:.1}" height="{card_height:.1}" rx="24" fill="url(#panel)" stroke="{accent}" stroke-width="2"/>"#
-        ));
-        svg.push_str(&text(
+        svg.push_str(&panel_card(x, y, panel_w, card_height, accent));
+        svg.push_str(&mono_text(
             x + 24.0,
-            y + 34.0,
-            22,
+            y + 32.0,
+            18,
             700,
-            "#1b1a17",
+            accent,
             &format!("{} · {}", run.meta.framework, run.meta.test_case),
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 58.0,
-            14,
+            10,
             500,
-            "#5f5a52",
+            TEXT_SECONDARY,
             &format!("{} · started {}", run.meta.path, run.meta.started_at_utc),
         ));
         svg.push_str(&metric_chip(
@@ -742,44 +900,44 @@ fn render_svg(summary: &ReportSummary) -> String {
             &format!("{:.3} ms", run.metrics.p999),
             accent,
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 132.0,
-            14,
-            700,
-            "#3a342d",
+            10,
+            500,
+            TEXT_SECONDARY,
             &format!("Server CPU {}", format_cpu(run.server_cpu.as_ref())),
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 154.0,
-            14,
-            700,
-            "#3a342d",
+            10,
+            500,
+            TEXT_SECONDARY,
             &format!("Client CPU {}", format_cpu(run.client_cpu.as_ref())),
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 176.0,
-            14,
-            700,
-            "#3a342d",
+            10,
+            500,
+            TEXT_SECONDARY,
             &format!("Server Net {}", format_net(run.server_net.as_ref())),
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 198.0,
-            14,
-            700,
-            "#3a342d",
+            10,
+            500,
+            TEXT_SECONDARY,
             &format!("Client Net {}", format_net(run.client_net.as_ref())),
         ));
-        svg.push_str(&text(
+        svg.push_str(&ui_text(
             x + 24.0,
             y + 220.0,
-            13,
+            10,
             500,
-            "#554e46",
+            TEXT_SECONDARY,
             &format!(
                 "Perf {}",
                 run.perf_hotspots
@@ -833,9 +991,9 @@ fn format_net(net: Option<&NetSummary>) -> String {
     }
 }
 
-fn panel_rect(x: f64, y: f64, w: f64, h: f64) -> String {
+fn panel_card(x: f64, y: f64, w: f64, h: f64, accent: &str) -> String {
     format!(
-        r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" rx="24" fill="url(#panel)" stroke="#dccfbe" stroke-width="1"/>"##
+        r##"<g><rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" rx="8" fill="{SURFACE}" stroke="{BORDER_LIGHT}" stroke-width="1"/><rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="4" rx="8" fill="{accent}"/></g>"##
     )
 }
 
@@ -846,14 +1004,32 @@ fn metric_chip(x: f64, y: f64, label: &str, value: &str, accent: &str) -> String
     let label_y = y + 14.0;
     let value_x = x + 14.0;
     let value_y = y + 29.0;
+    let fill = if accent == ACCENT_ORANGE {
+        HARROW_FILL
+    } else {
+        AXUM_FILL
+    };
     format!(
-        r##"<g><rect x="{x:.1}" y="{y:.1}" width="132" height="38" rx="19" fill="#fff8ef" stroke="{accent}" stroke-width="1.5"/><text x="{label_x:.1}" y="{label_y:.1}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" fill="#5f5a52">{label}</text><text x="{value_x:.1}" y="{value_y:.1}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="700" fill="#1b1a17">{value}</text></g>"##
+        r##"<g><rect x="{x:.1}" y="{y:.1}" width="132" height="38" rx="4" fill="{fill}" stroke="{accent}" stroke-width="1"/><text x="{label_x:.1}" y="{label_y:.1}" font-family="monospace" font-size="12" font-weight="700" fill="{accent}">{label}</text><text x="{value_x:.1}" y="{value_y:.1}" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="500" fill="{TEXT_PRIMARY}">{value}</text></g>"##
     )
 }
 
-fn text(x: f64, y: f64, size: u32, weight: u32, fill: &str, value: &str) -> String {
+fn metric_bar(x: f64, y: f64, w: f64, h: f64, stroke: &str, fill: &str) -> String {
     format!(
-        r#"<text x="{x:.1}" y="{y:.1}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="{size}" font-weight="{weight}" fill="{fill}">{}</text>"#,
+        r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" rx="4" fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>"##
+    )
+}
+
+fn ui_text(x: f64, y: f64, size: u32, weight: u32, fill: &str, value: &str) -> String {
+    format!(
+        r#"<text x="{x:.1}" y="{y:.1}" font-family="system-ui, -apple-system, sans-serif" font-size="{size}" font-weight="{weight}" fill="{fill}">{}</text>"#,
+        xml_escape(value)
+    )
+}
+
+fn mono_text(x: f64, y: f64, size: u32, weight: u32, fill: &str, value: &str) -> String {
+    format!(
+        r#"<text x="{x:.1}" y="{y:.1}" font-family="monospace" font-size="{size}" font-weight="{weight}" fill="{fill}">{}</text>"#,
         xml_escape(value)
     )
 }
@@ -876,6 +1052,10 @@ fn xml_escape(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn telemetry_svg_filename(test_case: &str) -> String {
+    format!("{test_case}.server.telemetry.svg")
+}
+
 fn generate_local_flamegraphs(results_dir: &Path, runs: &[RunSummary]) -> io::Result<()> {
     if !local_inferno_available() {
         return Ok(());
@@ -889,10 +1069,245 @@ fn generate_local_flamegraphs(results_dir: &Path, runs: &[RunSummary]) -> io::Re
 
         let folded_path = results_dir.join(format!("{}.server.perf.folded", run.meta.key));
         let svg_path = results_dir.join(format!("{}.server.perf.svg", run.meta.key));
+        if svg_path.exists() {
+            continue;
+        }
         generate_local_flamegraph(&script_path, &folded_path, &svg_path)?;
     }
 
     Ok(())
+}
+
+fn generate_telemetry_svgs(results_dir: &Path, summary: &ReportSummary) -> io::Result<()> {
+    for (test_case, pair) in grouped_runs(&summary.runs) {
+        let svg = render_telemetry_svg(test_case, &pair);
+        fs::write(results_dir.join(telemetry_svg_filename(test_case)), svg)?;
+    }
+    Ok(())
+}
+
+fn render_telemetry_svg(
+    test_case: &str,
+    pair: &BTreeMap<&str, &RunSummary>,
+) -> String {
+    let width = 1400.0;
+    let height = 860.0;
+    let panel_gap = 28.0;
+    let panel_w = (width - 44.0 * 2.0 - panel_gap) / 2.0;
+    let panel_h = 260.0;
+    let harrow = pair.get("harrow").copied();
+    let axum = pair.get("axum").copied();
+
+    let mut svg = String::new();
+    writeln!(
+        &mut svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{height:.0}" viewBox="0 0 {width:.0} {height:.0}" fill="none">"##
+    )
+    .unwrap();
+    writeln!(
+        &mut svg,
+        r##"<rect x="0" y="0" width="{width:.0}" height="{height:.0}" fill="{CANVAS}"/>"##
+    )
+    .unwrap();
+    svg.push_str(&mono_text(
+        44.0,
+        52.0,
+        18,
+        700,
+        TEXT_PRIMARY,
+        &format!("server telemetry :: {test_case}"),
+    ));
+    svg.push_str(&ui_text(
+        44.0,
+        82.0,
+        14,
+        500,
+        TEXT_SECONDARY,
+        "Harrow overlays Axum for server-side sar and vmstat signals",
+    ));
+
+    svg.push_str(&legend_chip(44.0, 104.0, ACCENT_ORANGE, HARROW_FILL, "harrow"));
+    svg.push_str(&legend_chip(156.0, 104.0, AXUM_GRAY, AXUM_FILL, "axum"));
+
+    let top_y = 140.0;
+    let left_x = 44.0;
+    let right_x = left_x + panel_w + panel_gap;
+    let bottom_y = top_y + panel_h + panel_gap;
+
+    svg.push_str(&render_series_panel(
+        left_x,
+        top_y,
+        panel_w,
+        panel_h,
+        "Server CPU Busy %",
+        "%",
+        harrow.map_or(&[][..], |run| run.telemetry.cpu_busy_pct.as_slice()),
+        axum.map_or(&[][..], |run| run.telemetry.cpu_busy_pct.as_slice()),
+    ));
+    svg.push_str(&render_series_panel(
+        right_x,
+        top_y,
+        panel_w,
+        panel_h,
+        "Server Net TX",
+        "MB/s",
+        harrow.map_or(&[][..], |run| run.telemetry.net_tx_mb_s.as_slice()),
+        axum.map_or(&[][..], |run| run.telemetry.net_tx_mb_s.as_slice()),
+    ));
+    svg.push_str(&render_series_panel(
+        left_x,
+        bottom_y,
+        panel_w,
+        panel_h,
+        "VMstat Runnable (r)",
+        "threads",
+        harrow.map_or(&[][..], |run| run.telemetry.run_queue.as_slice()),
+        axum.map_or(&[][..], |run| run.telemetry.run_queue.as_slice()),
+    ));
+    svg.push_str(&render_series_panel(
+        right_x,
+        bottom_y,
+        panel_w,
+        panel_h,
+        "VMstat Context Switches",
+        "/s",
+        harrow.map_or(&[][..], |run| run.telemetry.context_switches_s.as_slice()),
+        axum.map_or(&[][..], |run| run.telemetry.context_switches_s.as_slice()),
+    ));
+
+    svg.push_str("</svg>");
+    svg
+}
+
+fn render_series_panel(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    title: &str,
+    unit: &str,
+    harrow: &[f64],
+    axum: &[f64],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&panel_card(x, y, w, h, ACCENT_ORANGE));
+    out.push_str(&mono_text(x + 22.0, y + 32.0, 18, 700, ACCENT_ORANGE, title));
+
+    let plot_x = x + 20.0;
+    let plot_y = y + 56.0;
+    let plot_w = w - 40.0;
+    let plot_h = h - 90.0;
+    let max_y = series_max(harrow)
+        .max(series_max(axum))
+        .max(1.0);
+
+    for idx in 0..=3 {
+        let frac = idx as f64 / 3.0;
+        let gy = plot_y + plot_h - frac * plot_h;
+        out.push_str(&format!(
+            r##"<line x1="{plot_x:.1}" y1="{gy:.1}" x2="{:.1}" y2="{gy:.1}" stroke="{BORDER_LIGHT}" stroke-width="1"/>"##,
+            plot_x + plot_w
+        ));
+        out.push_str(&ui_text(
+            plot_x + plot_w - 2.0,
+            gy - 4.0,
+            10,
+            500,
+            TEXT_MUTED,
+            &format!("{:.1} {}", max_y * frac, unit),
+        ));
+    }
+
+    out.push_str(&polyline(plot_x, plot_y, plot_w, plot_h, max_y, harrow, ACCENT_ORANGE));
+    out.push_str(&polyline(plot_x, plot_y, plot_w, plot_h, max_y, axum, AXUM_GRAY));
+
+    out.push_str(&mono_text(
+        plot_x,
+        y + h - 18.0,
+        12,
+        600,
+        ACCENT_ORANGE,
+        &format!(
+            "harrow avg {:.1} {} peak {:.1}",
+            series_avg(harrow),
+            unit,
+            series_max(harrow)
+        ),
+    ));
+    out.push_str(&mono_text(
+        plot_x + 260.0,
+        y + h - 18.0,
+        12,
+        600,
+        AXUM_GRAY,
+        &format!(
+            "axum avg {:.1} {} peak {:.1}",
+            series_avg(axum),
+            unit,
+            series_max(axum)
+        ),
+    ));
+    out
+}
+
+fn legend_chip(x: f64, y: f64, color: &str, fill: &str, label: &str) -> String {
+    format!(
+        r##"<g><rect x="{x:.1}" y="{y:.1}" width="92" height="28" rx="4" fill="{fill}" stroke="{BORDER_LIGHT}" stroke-width="1"/><rect x="{:.1}" y="{:.1}" width="12" height="12" rx="4" fill="{fill}" stroke="{color}" stroke-width="1.5"/><text x="{:.1}" y="{:.1}" font-family="monospace" font-size="12" font-weight="700" fill="{color}">{}</text></g>"##,
+        x + 12.0,
+        y + 8.0,
+        x + 30.0,
+        y + 18.0,
+        xml_escape(label)
+    )
+}
+
+fn polyline(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    max_y: f64,
+    series: &[f64],
+    color: &str,
+) -> String {
+    if series.is_empty() {
+        return String::new();
+    }
+
+    if series.len() == 1 {
+        let cy = y + h - (series[0] / max_y) * h;
+        return format!(
+            r##"<circle cx="{:.1}" cy="{cy:.1}" r="4" fill="{color}"/>"##,
+            x + w / 2.0
+        );
+    }
+
+    let mut points = String::new();
+    for (idx, value) in series.iter().enumerate() {
+        let frac = idx as f64 / (series.len() - 1) as f64;
+        let px = x + frac * w;
+        let py = y + h - (value / max_y) * h;
+        if !points.is_empty() {
+            points.push(' ');
+        }
+        write!(&mut points, "{px:.1},{py:.1}").unwrap();
+    }
+
+    format!(
+        r##"<polyline fill="none" stroke="{color}" stroke-width="2.5" points="{points}" stroke-linejoin="round" stroke-linecap="round"/>"##
+    )
+}
+
+fn series_avg(series: &[f64]) -> f64 {
+    if series.is_empty() {
+        0.0
+    } else {
+        series.iter().sum::<f64>() / series.len() as f64
+    }
+}
+
+fn series_max(series: &[f64]) -> f64 {
+    series.iter().copied().fold(0.0, f64::max)
 }
 
 fn local_inferno_available() -> bool {
