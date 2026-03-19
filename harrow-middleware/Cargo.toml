@@ -13,6 +13,7 @@ request-id = []
 cors = []
 o11y = ["dep:tracing", "dep:rolly", "dep:harrow-o11y", "dep:blake3"]
 catch-panic = ["dep:futures-util"]
+body-limit = []
 compression = ["dep:flate2"]
 compression-br = ["compression", "dep:brotli"]
 

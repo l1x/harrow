@@ -13,5 +13,8 @@ pub mod o11y;
 #[cfg(feature = "catch-panic")]
 pub mod catch_panic;
 
+#[cfg(feature = "body-limit")]
+pub mod body_limit;
+
 #[cfg(feature = "compression")]
 pub mod compression;
