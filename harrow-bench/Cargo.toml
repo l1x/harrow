@@ -6,7 +6,7 @@ license.workspace = true
 description = "Benchmarks and load driver for Harrow"
 
 [dependencies]
-harrow = { path = "../harrow", features = ["json", "msgpack", "timeout", "request-id", "cors", "compression", "catch-panic", "o11y", "body-limit", "rate-limit"] }
+harrow = { path = "../harrow", features = ["json", "msgpack", "timeout", "request-id", "cors", "compression", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
 harrow-core = { workspace = true, features = ["json", "msgpack"] }
 harrow-o11y = { workspace = true }
 axum = { workspace = true }
@@ -17,14 +17,15 @@ rmp-serde = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
+tower = "0.5"
 toml = "0.8"
+blake3 = { workspace = true }
 mimalloc = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 matchit = { workspace = true }
 tower-http = { version = "0.6", features = ["timeout", "request-id", "cors", "compression-gzip"] }
-tower = "0.5"
 uuid = { version = "1", features = ["v4"] }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -65,6 +66,10 @@ path = "src/bin/measure_allocs.rs"
 [[bin]]
 name = "profile-concurrent"
 path = "src/bin/profile_concurrent.rs"
+
+[[bin]]
+name = "profile-session"
+path = "src/bin/profile_session.rs"
 
 [[bin]]
 name = "harrow-perf-server"
@@ -140,4 +145,8 @@ harness = false
 
 [[bench]]
 name = "rate_limit"
+harness = false
+
+[[bench]]
+name = "session"
 harness = false

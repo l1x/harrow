@@ -1,482 +1,603 @@
-# Building a Fast HTTP Framework: Harrow's Performance Story
+# Harrow Performance Journal
 
-**Date:** 2026-03-11
-**Platform:** Apple Silicon (arm64-darwin), Rust 1.85.0, release profile (`opt-level = 3`, `lto = "thin"`)
+**Status:** living document  
+**Last updated:** 2026-03-20
 
----
+This is not a launch post and not a benchmark victory lap. It is a dated
+engineering log for Harrow's performance work: what we measured, what moved the
+numbers, what did not, and which optimizations we deliberately refused to do.
 
-## The Goal
+The intended audience is technical readers on places like Hacker News and
+Reddit, but the real goal is internal memory. Performance arguments decay
+quickly. This file exists so future us can see the evidence chain instead of
+reconstructing it from commit history and half-remembered flamegraphs.
 
-Harrow is a thin, macro-free HTTP framework built directly on Hyper. The design constraint: framework overhead should be invisible compared to the TCP baseline. Every microsecond of added latency is a microsecond that could serve user logic instead.
+## Executive Summary
 
-This is the story of how we got there — phase by phase, measurement by measurement.
+- On 2026-03-19, Harrow was still about **2x slower than Axum** on a matched
+  remote throughput test.
+- The root cause was not routing, JSON, or Hyper. It was **per-connection
+  Tokio timers** for header read timeout and connection lifetime.
+- Making those timers optional and disabling them in the benchmark servers
+  moved Harrow from **501,742 -> 1,041,052 RPS** on `/text` and
+  **589,757 -> 967,501 RPS** on `/json/1kb` on `c8g.12xlarge`.
+- We also benchmarked the middleware architecture directly instead of arguing in
+  the abstract. Pure Tower-style static layers are effectively allocation-flat.
+  Harrow's dynamic middleware costs about **+728 bytes and +2 allocs per noop
+  layer**. Axum's ergonomic `middleware::from_fn` path is much steeper.
+- That still does **not** justify rewriting `Next` yet. On a realistic
+  `cors + compression + session` stack, the dominant cost is session and
+  compression work, not middleware-chain plumbing.
 
----
+## What Harrow Is Optimizing For
 
-## How We Measure
+Harrow is trying to be a thin, macro-free HTTP framework on top of Hyper.
+There are three design constraints:
 
-We measure at three isolation levels so we can attribute cost precisely:
+1. Framework overhead should stay below transport and application noise.
+2. The fast path should be understandable without Tower-level type archaeology.
+3. We will accept some runtime indirection if it avoids compile-time and API
+   complexity explosion, but only when the measured cost is small.
 
-| Level | What it isolates | How |
-|-------|-----------------|-----|
-| **Micro** | Pure CPU cost of path matching and route lookup | Direct function calls, no I/O, no async |
-| **Client** | Full framework dispatch without TCP | `App::client()` — constructs `Request`, runs middleware chain, calls handler, returns `Response` |
-| **TCP** | Complete HTTP/1.1 request-response cycle | Keep-alive `BenchClient` over loopback, measures kernel TCP + Hyper + Harrow |
+That third constraint matters. A lot of Rust performance discussions collapse
+into "dynamic dispatch bad, monomorphization good." That is too simple to be
+useful. The real question is always: **what did the extra flexibility cost on
+the workload we actually care about?**
 
-The micro level tells us if our data structures are efficient. The client level tells us how much the framework adds on top. The TCP level tells us what real users will see.
+## Measurement Stack
 
-### Tooling
+We measure Harrow at four levels.
 
-- **Criterion 0.5** for statistically rigorous timing (100 samples, outlier detection, regression detection)
-- **Custom `TrackingAllocator`** for per-operation allocation counting (wraps `System` with atomic counters, 10,000 iterations per measurement)
-- **Machine-readable baseline** in `harrow-bench/benches/baseline.toml` — diffable in PRs, updated by `cargo run --bin update-baseline`
-- **SVG renderer** that produces `docs/performance.svg` from the TOML data — no external dependencies
-- **Flamegraphs** via `cargo-flamegraph` (DTrace on macOS) for hot-path analysis
+| Level | What it isolates | Typical tool |
+|---|---|---|
+| Micro | Route/path logic and other pure CPU work | Criterion |
+| In-process dispatch | Request -> middleware -> handler without TCP | Criterion + custom alloc harness |
+| Local TCP | Full HTTP/1.1 request-response over loopback | Criterion + `BenchClient` |
+| Remote throughput | Real network, scheduler, allocator, kernel contention | Docker + `perf` + `sar` on AWS |
 
-### Statistical Rigor
+This split is important because different problems only appear at different
+scales.
 
-Criterion runs 100 samples per benchmark with automatic warmup detection and outlier removal. We report mean and median — when they diverge significantly, it indicates measurement noise (usually from the kernel TCP stack), not framework variance.
+- Path matching bugs show up in micro benches.
+- Middleware allocation slopes show up in in-process dispatch.
+- Request/response overhead shows up in local TCP.
+- Scheduler and timer contention only showed up in the remote throughput test.
 
-### Allocation Accuracy
+### Tools
 
-The `TrackingAllocator` wraps `std::alloc::System` with `AtomicU64` counters. Tracking is toggled on/off per measurement window. We run 10,000 iterations and divide by the count. The allocator tracks every `alloc()` call including those from Hyper, Tokio, serde, and the framework itself — this is total per-operation cost, not just framework allocations.
+- **Criterion 0.5** for timing and regression detection.
+- **`TrackingAllocator`** in
+  `harrow-bench/src/bin/measure_allocs.rs` for `alloc_bytes` and
+  `alloc_count` per operation.
+- **Committed baselines** in `harrow-bench/benches/baseline.toml`.
+- **Rendered summaries** from `harrow-bench/src/bin/render_baseline.rs`.
+- **Remote artifacts** in `docs/perf/...` including `perf report`, `sar`, JSON
+  output, and telemetry charts.
 
-### Fairness Principles
+### Fairness Rules
 
-The comparison against Axum follows strict fairness rules:
+We only trust comparison numbers when the workload is genuinely matched.
 
-- Same Tokio runtime configuration (current-thread for alloc tracking, multi-thread for criterion)
-- Same `BenchClient` (custom keep-alive HTTP/1.1 client, same for both frameworks)
-- Same response bodies (byte-identical where possible)
-- Same `--release` profile, same machine, sequential execution (never both under load simultaneously)
-- Same warmup period and iteration count
+That means:
 
-### Machine-Readable Baseline
+- same route corpus
+- same client behavior
+- same runtime shape
+- same response semantics
+- one experimental variable at a time
 
-All measurements are stored in `harrow-bench/benches/baseline.toml` — a TOML file that maps 1:1 to criterion's JSON output. The workflow:
+One concrete example: at one point the remote JSON benchmark was not matched.
+Harrow served JSON through its high-level helper while Axum used a manual
+`serde_json::to_vec` + raw bytes response. That is a benchmark bug, not a
+framework comparison. We fixed the Axum perf server to use `axum::Json` so the
+comparison now measures comparable response construction on both sides.
+
+Another example: Harrow originally had per-connection timeouts enabled in the
+server benchmark path while Axum's default `axum::serve` path did not configure
+equivalent per-connection timers. Again, not a fair framework comparison.
+
+### What Gets Written Down
+
+If a number matters, it should live somewhere durable:
+
+- `harrow-bench/benches/baseline.toml` stores local timing and allocation
+  baselines.
+- `docs/perf/c8g.12xlarge/.../summary.md` stores remote server results.
+- This file explains what changed and why.
+
+## 2026-03-11: Local Baseline After the First Cleanup Pass
+
+The first useful baseline was local, on Apple Silicon, after the initial route
+and serialization cleanup work. This snapshot is still useful because it tells
+us what Harrow looked like before the remote timer issue dominated the story.
+
+### Micro and Dispatch Numbers
+
+From `harrow-bench/benches/baseline.toml`:
+
+| Benchmark | Time | Allocations |
+|---|---:|---:|
+| Exact path match (`/health`) | 14.2 ns | 0 B / 0 allocs |
+| 1-param path match (`/users/:id`) | 66.8 ns | 196 B / 3 allocs |
+| Glob match (`/files/*path`) | 130.9 ns | 271 B / 4 allocs |
+| Route lookup, 100 routes worst case | 85.3 ns | 52 B / 3 allocs |
+| In-process dispatch, text, 0 middleware | 324.8 ns | 1389 B / 6 allocs |
+| In-process dispatch, text, 5 noop middleware | 863.8 ns | 5029 B / 16 allocs |
+| In-process dispatch, JSON 1KB, 0 middleware | 2780.9 ns | 5381 B / 12 allocs |
+
+The route lookup story changed dramatically once Harrow switched from a linear
+scan to `matchit`. Route count stopped mattering in any meaningful way for the
+local profile. That was a real win, but it was also a warning: once route
+lookup is down in the tens of nanoseconds, it is no longer where to spend your
+attention.
+
+![Local baseline dashboard](./performance.svg)
+
+### Local TCP Comparison Against Axum
+
+From the same baseline snapshot:
+
+| Benchmark | Harrow | Axum |
+|---|---:|---:|
+| Text echo | 22.74 us | 27.46 us |
+| JSON echo | 23.21 us | 24.99 us |
+| Param echo | 23.15 us | 24.88 us |
+| 404 miss | 22.50 us | 24.40 us |
+
+So locally, Harrow was already ahead on latency by about 7-17% depending on the
+case.
+
+This baseline was taken after Harrow's `BoxBody` refactor, so the local win was
+not coming from a fantasy "everything is monomorphized and concretely typed"
+response path. That distinction matters because it keeps the article honest
+about which design choices were still present when these numbers were recorded.
+
+The allocation story was more nuanced than the original article draft implied:
+
+| Benchmark | Harrow | Axum |
+|---|---:|---:|
+| Text echo | 9898 B / 11 allocs | 9449 B / 17 allocs |
+| JSON echo | 10686 B / 17 allocs | 10238 B / 23 allocs |
+| Param echo | 9956 B / 14 allocs | 10143 B / 21 allocs |
+| 404 miss | 8762 B / 9 allocs | 9030 B / 12 allocs |
+
+Harrow was clearly doing **fewer allocations**, but not necessarily fewer bytes
+in every case. That is worth writing down because it killed an easy but wrong
+story. The local latency win was not "Harrow allocates 6x less memory than
+Axum." The reality was narrower and more honest: Harrow was ahead on the local
+TCP path while still sharing plenty of boxed and buffered machinery with the
+rest of the Rust HTTP ecosystem.
+
+### What Moved the Early Local Numbers
+
+The important early improvements were straightforward:
+
+- serializing JSON directly into a buffer instead of bouncing through extra
+  temporary allocations
+- using static header values where possible
+- switching routing to `matchit`
+- keeping the API and request path simple enough that we could still reason
+  about what was actually happening
+
+## Monomorphization vs Dynamic Dispatch
+
+This is the section we kept having to rediscover in chat, so it belongs in the
+article.
+
+### Harrow's Middleware Model
+
+Today Harrow's middleware API is intentionally dynamic:
+
+```rust
+type BoxFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
+
+pub trait Middleware: Send + Sync {
+    fn call(&self, req: Request, next: Next) -> BoxFuture;
+}
+
+pub struct Next {
+    inner: Box<dyn FnOnce(Request) -> BoxFuture + Send>,
+}
+```
+
+That buys a simple user-facing shape:
+
+```rust
+async fn my_middleware(req: Request, next: Next) -> Response
+```
+
+No macros. No Tower stack types in user errors. No giant generic router type.
+
+### Tower's Model
+
+Tower pushes much more of the stack to compile time:
+
+```rust
+trait Service<Request> {
+    type Response;
+    type Error;
+    type Future: Future<Output = Result<Self::Response, Self::Error>>;
+}
+```
+
+Layers wrap services into nested concrete types. That means the compiler can
+see the entire stack, inline aggressively, and often eliminate per-request
+allocation at the middleware boundary.
+
+The trade-off is not imaginary:
+
+- more monomorphization
+- larger generated types
+- worse compile times and diagnostics
+- more pressure to shape the public API around Tower's abstraction model
+
+### What We Measured Instead of Assuming
+
+We built an allocation harness for three cases:
+
+1. Harrow's dynamic noop middleware
+2. Axum's ergonomic `middleware::from_fn`
+3. A pure Tower-style generic noop layer
+
+For the `text` path:
+
+| Stack | Depth 0 | Depth 10 | Increment per layer |
+|---|---:|---:|---:|
+| Harrow | 1389 B / 6 allocs | 8669 B / 26 allocs | about `+728 B`, `+2 allocs` |
+| Axum `from_fn` | 1052 B / 14 allocs | 14732 B / 164 allocs | about `+1368 B`, `+15 allocs` |
+| Pure Tower | 693 B / 4 allocs | 693 B / 4 allocs | effectively `+0` |
+
+Timing told the same story. Harrow's noop middleware slope is about
+`100-125 ns` per layer. Pure Tower is flatter. Axum's ergonomic path is much
+heavier.
+
+This is the real trade-off:
+
+- **Pure Tower** is the low-allocation ideal.
+- **Axum `from_fn`** is the ergonomic dynamic end of the spectrum.
+- **Harrow** sits in the middle on purpose.
+
+That middle ground is defensible as long as the incremental cost stays small on
+real workloads.
+
+## 2026-03-19: Remote Throughput Said We Still Had a Serious Problem
+
+The local story looked good. The remote story did not.
+
+On `c8g.12xlarge`, before the timer fix, Harrow was getting crushed:
+
+| Case | Harrow | Axum | Delta |
+|---|---:|---:|---:|
+| `/text`, c=128 | 501,742 RPS | 1,019,224 RPS | -50.77% |
+| `/json/1kb`, c=128 | 589,757 RPS | 998,524 RPS | -40.94% |
+
+The perf reports made the problem obvious.
+
+From `docs/perf/c8g.12xlarge/2026-03-19T07-36-57Z/harrow_text_c128.server.perf-report.txt`:
+
+- `7.64%` in `tokio::time::sleep::Sleep::poll`
+- `6.96%` in `drop_in_place<tokio::time::sleep::Sleep>`
+- `5.03%` in `parking_lot_core::word_lock::WordLock::lock_slow`
+
+From the matching JSON run:
+
+- `6.10%` in `Sleep::poll`
+- `5.63%` in `drop_in_place<Sleep>`
+- `3.07%` in `WordLock::lock_slow`
+
+This was not a subtle micro-optimization issue. Harrow's benchmark server was
+creating a Tokio timer and a `Sleep` per connection for:
+
+- header read timeout
+- connection lifetime timeout
+
+At 500K+ RPS across 48 cores, that meant a lot of traffic through Tokio's timer
+machinery and its internal locks. Axum's default server path was not paying the
+same cost.
+
+![Initial remote throughput dashboard](./perf/c8g.12xlarge/2026-03-19T07-36-57Z/summary.svg)
+
+![Initial `/text` server telemetry](./perf/c8g.12xlarge/2026-03-19T07-36-57Z/text-c128.server.telemetry.svg)
+
+### The Fix
+
+We did not remove the safety features globally. We made them optional.
+
+`ServerConfig` now keeps production defaults:
+
+- `header_read_timeout: Some(5s)`
+- `connection_timeout: Some(300s)`
+
+But the benchmark servers use `serve_with_config` with both timeouts set to
+`None`, which removes timer setup from the hot path and matches Axum's default
+serving path more closely.
+
+### What Changed
+
+After disabling those timers in the benchmark servers:
+
+| Case | Before | After | Improvement |
+|---|---:|---:|---:|
+| `/text`, c=128 | 501,742 RPS | 1,041,052 RPS | +107.5% |
+| `/json/1kb`, c=128 | 589,757 RPS | 967,501 RPS | +64.0% |
+
+And the matched comparison against Axum moved to:
+
+| Case | Harrow | Axum | Delta |
+|---|---:|---:|---:|
+| `/text`, c=128 | 1,041,052 RPS | 1,055,730 RPS | -1.39% |
+| `/json/1kb`, c=128 | 967,501 RPS | 1,017,350 RPS | -4.90% |
+
+For `/text`, Harrow was effectively at parity. The old "Harrow is 2x slower"
+statement stopped being true the moment the timer issue was removed.
+
+![Post-fix remote throughput dashboard](./perf/c8g.12xlarge/2026-03-19T13-34-49Z/summary.svg)
+
+![Post-fix `/text` server telemetry](./perf/c8g.12xlarge/2026-03-19T13-34-49Z/text-c128.server.telemetry.svg)
+
+### Important Lesson
+
+The remote bottleneck was not where local Criterion pointed us.
+
+Local benchmarks were still useful. They told us routing and JSON were already
+pretty tight. But the actual throughput collapse turned out to be a scheduler
+and timer-wheel problem that only appeared at real server concurrency.
+
+That is why the measurement stack has multiple levels.
+
+## Benchmark Fairness Matters More Than Clever Explanations
+
+The remote JSON comparison had another trap: we initially were not comparing the
+same response construction strategy.
+
+Harrow's perf server served JSON through Harrow's normal JSON response path.
+Axum's perf server was manually doing `serde_json::to_vec` and returning raw
+bytes. That mixes framework overhead with application policy.
+
+We fixed the Axum perf server so the JSON routes now use `axum::Json(...)`,
+which is the fairer comparison for "what does the framework's normal JSON
+response path cost?"
+
+This is a broader rule we are trying to keep:
+
+- compare framework to framework
+- compare helper to helper
+- compare manual bytes to manual bytes
+
+Anything else is storytelling.
+
+## 2026-03-20: Should Harrow Rewrite `Next`?
+
+Once the timer bug was fixed, the next obvious question was middleware.
+
+Harrow's middleware path still has two dynamic pieces:
+
+- boxed middleware futures
+- a boxed `Next` continuation
+
+It is tempting to look at that and jump straight to a Tower-style rewrite. We
+did not do that. We measured it first.
+
+### Noop Middleware Slope
+
+In-process dispatch showed a clean linear Harrow slope:
+
+- about `+728 bytes` per layer
+- about `+2 allocs` per layer
+- about `+100-125 ns` per layer
+
+That is real overhead, but it is not automatically a problem.
+
+### What Would a Rewrite Buy?
+
+The most conservative rewrite would remove the boxed `Next` continuation while
+keeping the public middleware shape the same. That would likely reduce some of
+the per-layer slope without forcing a Tower-style API onto users.
+
+But complexity has to be justified. We set a bar:
+
+- either the realistic stack has to show middleware plumbing as a meaningful
+  share of cost
+- or an A/B implementation has to win clearly, not by a handful of nanoseconds
+
+So we built a realistic stack benchmark before touching `Next`.
+
+## 2026-03-20: Realistic Stack - `cors + compression + session`
+
+This is the most useful recent addition to the benchmark suite.
+
+The new session middleware adds request extensions, signed cookies, session
+store access, and `set-cookie` emission. We benchmarked both session in
+isolation and a more realistic stack with CORS and compression.
+
+### Session-Only Criterion Results
+
+Fresh local run from `cargo bench -p harrow-bench --bench session -- --noplot`:
+
+| Scenario | Time |
+|---|---:|
+| `baseline_0mw` | about 32.0 us |
+| `session_no_touch` | about 32.7 us |
+| `session_existing_read` | about 32.1 us |
+| `session_existing_write` | about 33.6 us |
+| `session_new` | about 35.3 us |
+| `session_read_plus_noop` | about 32.3 us |
+
+The key comparison is `session_existing_read` vs `session_read_plus_noop`:
+
+- read: about `32.1 us`
+- read + one noop middleware: about `32.3 us`
+
+That is effectively flat.
+
+### Session Allocation Results
+
+From the allocation harness:
+
+| Scenario | Allocations |
+|---|---:|
+| `session_no_touch` | 11214 B / 19 allocs |
+| `session_existing_read` | 12108 B / 31 allocs |
+| `session_existing_write` | 13422 B / 53 allocs |
+| `session_new` | 12996 B / 37 allocs |
+| `session_read_plus_noop` | 12836 B / 33 allocs |
+
+Again, `session_existing_read -> session_read_plus_noop` is exactly the
+expected Harrow noop slope:
+
+- `+728 bytes`
+- `+2 allocs`
+
+So the middleware plumbing overhead is present, but small and unsurprising.
+
+### Realistic Stack Results
+
+For a 1 KB text response with realistic request headers plus
+`session + cors + compression`:
+
+Criterion:
+
+| Scenario | Time |
+|---|---:|
+| `realistic_stack_baseline` | about 30.7 us |
+| `realistic_stack_read` | about 44.7 us |
+| `realistic_stack_write` | about 47.2 us |
+
+Allocation harness:
+
+| Scenario | Allocations |
+|---|---:|
+| `realistic_stack_baseline` | 10298 B / 18 allocs |
+| `realistic_stack_read` | 369043 B / 69 allocs |
+| `realistic_stack_write` | 370357 B / 91 allocs |
+
+Those are not typo-level numbers. The realistic stack is far heavier than the
+noop middleware slope.
+
+### Why the Realistic Stack Is Heavy
+
+The code explains a lot of it.
+
+The compression middleware currently:
+
+1. collects the full body
+2. copies it into a `Vec<u8>`
+3. compresses into another `Vec<u8>`
+4. rebuilds the response and copies headers back
+
+That is visible directly in `harrow-middleware/src/compression.rs`.
+
+The session middleware also does real work:
+
+- parse and verify cookies
+- load and clone session data from the store
+- snapshot session data again on write
+- append `set-cookie` headers on mutation
+
+So for the realistic stack, the numbers say something very specific:
+
+**do not rewrite `Next` yet.**
+
+On this workload, `Next` is not where the money is.
+
+## What We Are Deliberately Not Doing Yet
+
+### Not Rewriting the Middleware Stack Into Pure Tower
+
+Yes, a pure Tower-style static middleware stack can eliminate a lot of
+per-request allocation. We measured the upside.
+
+We are still not doing it yet because:
+
+- Harrow's current user-facing middleware API is much simpler
+- the realistic-stack bottleneck is elsewhere
+- a hybrid dynamic/static design would create a second conceptual model to own
+- compile-time complexity and code-size growth are real costs, not imaginary
+
+If we ever take this step, it should be because realistic workloads justify it,
+not because "zero allocations" sounds cleaner in a design doc.
+
+### Not Pooling Futures or Continuations
+
+Pooling is the kind of optimization that looks clever long before it looks
+correct. Async cancellation, lifetime management, and reuse semantics can make
+it ugly fast. We would rather remove an allocation structurally than build a
+pool around it.
+
+### Not Mixing In Unmeasured Allocator Changes
+
+`mimalloc` is a separate experiment. We intentionally did not fold allocator
+changes into the timer story because that would have muddied attribution. If an
+allocator change helps, we want to know that separately.
+
+## Verification, Not Just Benchmarking
+
+Performance work is easy to cargo-cult unless it sits next to correctness work.
+
+We now keep a separate verification strategy in `docs/verification.md`. The
+short version:
+
+- `proptest` for path matching, middleware ordering, compression round-trips,
+  and rate-limiter arithmetic
+- fuzzing for parsing surfaces
+- ordinary unit and integration tests for the thin wrapper middleware
+
+We are explicitly **not** pretending this project needs TLA+, Jepsen, or other
+distributed-systems machinery. Harrow is an HTTP framework, not a consensus
+engine.
+
+## Current Thesis
+
+As of 2026-03-20, the strongest performance conclusions are:
+
+1. Harrow's local routing and dispatch costs are already small.
+2. The big remote throughput regression was caused by per-connection timers.
+3. Middleware allocation slope is real, measurable, and still much cheaper than
+   Axum's ergonomic `from_fn` path.
+4. Pure Tower-style static layers are still the lower-allocation ideal.
+5. The next optimization worth chasing is probably in compression/session work,
+   not in rewriting `Next`.
+
+That last point is the one most worth preserving. We now have enough data to
+avoid a complexity explosion for a marginal win.
+
+## How To Reproduce The Current Evidence
+
+Local timing and allocation:
 
 ```bash
-# 1. Run criterion benchmarks
 cargo bench
-
-# 2. Extract timing results into TOML
 cargo run --bin update-baseline
-
-# 3. Measure allocations
-cargo run --release --bin measure-allocs
-
-# 4. Render visualization
+cargo run --release -p harrow-bench --bin measure-allocs
 cargo run --bin render-baseline
 ```
 
-The TOML file is committed to the repository. In PRs, reviewers see the raw number diffs alongside code changes. The SVG visualization makes trends immediately visible.
-
----
-
-## Phase 0: The Naive Implementation
-
-Before we had benchmarks, we had code. The initial implementation prioritized correctness and clarity over performance:
-
-- **`HashMap` for params, `Vec` collection on every match** — every parameterized route allocated a `HashMap` and collected matches into a `Vec`
-- **`serde_json::to_vec()`** — serialized JSON into an intermediate `Vec<u8>`, then copied into the response body
-- **`HeaderValue::from_str()` per request** — parsed and validated known header values (like `content-type: application/json`) on every response
-- **`PathPattern.raw` was `String`** — cloned the route pattern string on every match
-- **Linear scan O(n_routes) for route lookup** — iterated through every registered route until a match was found
-- **No benchmarks** — we were flying blind
-
-This was fine for getting the framework working. But we had no idea how it compared to alternatives, and no way to know if changes made things better or worse.
-
----
-
-## Phase 1: First Measurement — Axum Is Faster
-
-The first step was establishing a measurement baseline. We added Criterion benchmarks and an Axum comparison harness (commit `6d84fe9`).
-
-The initial numbers were humbling:
-
-| Benchmark | Harrow | Axum | Delta |
-|-----------|--------|------|-------|
-| JSON echo | 26.3 µs | ~24.7 µs | **Axum 7% faster** |
-
-Route lookup at 100 routes (worst case, linear scan):
-
-| Routes | Time | Per-route cost |
-|--------|------|----------------|
-| 1 | 84 ns | — |
-| 10 | 190 ns | ~12 ns/route |
-| 50 | 634 ns | ~11 ns/route |
-| 100 | 1.19 µs | ~11 ns/route |
-| 200 | 2.30 µs | ~11 ns/route |
-
-Axum was faster on latency, and we could see why: our hot path had unnecessary allocations on every request. The benchmarks forced us to look at where the time was going.
-
----
-
-## Phase 2: Eliminating Hot-Path Allocations — Reaching Parity
-
-Three targeted changes closed the gap (commit `47f4fb4`):
-
-### 1. `serde_json::to_writer` into `BytesMut(128)`
-
-Before: `serde_json::to_vec()` allocated an intermediate `Vec<u8>`, which was then copied into a `Bytes` for the response body — two allocations.
-
-After:
-
-```rust
-// harrow-core/src/response.rs, lines 39-52
-pub fn json(value: &impl serde::Serialize) -> Self {
-    let mut buf = BytesMut::with_capacity(128);
-    match serde_json::to_writer((&mut buf).writer(), value) {
-        Ok(()) => {
-            let mut resp = Self::new(StatusCode::OK, buf.freeze());
-            resp.set_header_static(
-                http::header::CONTENT_TYPE,
-                http::header::HeaderValue::from_static("application/json"),
-            );
-            resp
-        }
-        Err(_) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "serialization error"),
-    }
-}
-```
-
-Serialize directly into a pre-allocated `BytesMut(128)`, then `freeze()` it into `Bytes` with zero copy. Impact: **-0.4 µs** on JSON responses.
-
-### 2. `HeaderValue::from_static` for known headers
-
-Before: `HeaderValue::from_str("application/json")` — parsed and validated the header value on every response.
-
-After:
-
-```rust
-// harrow-core/src/response.rs, lines 75-81
-fn set_header_static(
-    &mut self,
-    name: http::header::HeaderName,
-    value: http::header::HeaderValue,
-) {
-    self.inner.headers_mut().insert(name, value);
-}
-```
-
-`HeaderValue::from_static` is a compile-time operation — the value is validated once at compile time, not on every request. Impact: **-0.1 µs** per static header.
-
-### 3. `PathPattern.raw`: `String` → `Arc<str>`
-
-The route pattern (e.g., `"/users/:id"`) was stored as a `String` and cloned via `to_string()` on every match. Switching to `Arc<str>` makes cloning a single atomic refcount bump. Impact: **-0.1 µs** per route match.
-
-### Result
-
-| Metric | Before | After | Change |
-|--------|--------|-------|--------|
-| JSON echo | 26.3 µs | 24.8 µs | **-7%** |
-| vs Axum | Axum 7% faster | Parity | — |
-
-### Why Axum Can't Eliminate These Allocations
-
-With Harrow now at parity, the allocation difference became the interesting story. One major source of Axum's per-request overhead is body type-erasure.
-
-Axum's `Body` type is defined in `axum-core/src/body.rs`:
-
-```rust
-type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, Error>;
-
-pub struct Body(BoxBody);
-```
-
-Every response body — even a `&'static str` — goes through this path:
-
-```rust
-// axum-core/src/body.rs, line 97
-impl From<&'static str> for Body {
-    fn from(buf: &'static str) -> Self {
-        Self::new(http_body_util::Full::from(buf))  // heap allocation
-    }
-}
-```
-
-`Self::new()` calls `body.map_err(Error::new).boxed_unsync()`, which creates a `Pin<Box<dyn Body>>` — a heap-allocated trait object. This happens on both the request body *and* the response body, so every request-response cycle pays for two trait-object allocations (~3 KB) even when the body types are known at compile time.
-
-**Why Axum does this:** `Router` needs to store handlers with different response types in the same data structure. Type-erasing the body to `dyn Body` is the simplest way to make `Router::route("/a", get(returns_string)).route("/b", get(returns_json))` compile. It's a necessary trade-off for Axum's generic API.
-
-**What Harrow does instead:** `Response` wraps `http::Response<Full<Bytes>>` — a concrete type, not a trait object:
-
-```rust
-// harrow-core/src/response.rs, line 6
-pub struct Response {
-    inner: http::Response<Full<Bytes>>,
-}
-```
-
-No boxing. The trade-off: Harrow handlers must return `Response` (or implement `IntoResponse` which returns `Response`). Less flexible, but zero heap allocation on the response path.
-
----
-
-## Phase 3: Route Lookup Overhaul — 14x Faster
-
-The linear scan was acceptable for small route tables, but it scaled poorly. We replaced the custom trie (which was really a linear scan calling `match_path` on each route) with `matchit`, a compressed radix trie (commit `f8acb35`).
-
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| 100 routes, worst case | 1.19 µs | 85 ns | **14x faster** |
-| Complexity | O(n_routes) | O(path_length) | Constant vs route count |
-
-At TCP scale (~22 µs baseline), the routing improvement is largely invisible — 85 ns is lost in TCP noise. But it means Harrow's routing cost is effectively constant regardless of route table size. A service with 500 routes pays the same routing overhead as one with 5.
-
-### Why Axum's Routing Costs More Than Just the Trie
-
-Axum also uses `matchit` for route matching, so the trie lookup itself is equivalent. The difference is what happens *around* the match.
-
-Axum stores routing metadata in `http::Extensions`, which is a type-erased `HashMap`:
-
-- `OriginalUri` — clones the request URI (allocates a `String` for the path)
-- `MatchedPath` — stores the matched route pattern
-- URL params — stored via `insert_url_params(&mut parts.extensions, match_.params)`
-
-Each `Extensions::insert()` is a `HashMap` insertion with potential reallocation. For a request with path params, the matched params from `matchit` are collected into a `Vec<(String, String)>` and inserted into extensions. Combined, this is ~2 KB of per-request overhead.
-
-**What Harrow does instead:** Params from the trie match are stored directly on `Request` as a `Vec<(String, String)>` — no indirection through `Extensions`. State is accessed via `Arc<TypeMap>` which is shared (zero per-request allocation), not cloned.
-
----
-
-## Phase 4: Where We Are Now — The Final Numbers
-
-The reader has watched each optimization happen. Here's where Harrow stands today.
-
-### Harrow Standalone
-
-#### Path Matching
-
-Pure CPU cost of `PathPattern::match_path`:
-
-| Operation | Latency | Allocations |
-|-----------|---------|-------------|
-| Exact match (`/health`) | 14 ns | 0 |
-| 1 param (`/users/:id`) | 67 ns | 3 (196 B) |
-| Glob (`/files/*path`) | 131 ns | 4 (271 B) |
-| Route lookup, 100 routes worst case | 85 ns | 3 (52 B) |
-
-Exact match is zero-allocation — the iterator walks segments and compares literals. Each param adds ~55 ns dominated by `String` allocation for the captured value. Route lookup uses a trie, so it's O(path_length) not O(n_routes).
-
-#### TCP Round-Trip
-
-Full HTTP/1.1 request-response over loopback:
-
-| Operation | Latency | Alloc/op |
-|-----------|---------|----------|
-| Text echo, 0 middleware | 22.7 µs | 1,487 B (7 allocs) |
-| JSON echo, 0 middleware | 23.2 µs | 2,281 B (12 allocs) |
-| Param echo, 0 middleware | 23.2 µs | 1,543 B (10 allocs) |
-| 404 miss, 0 middleware | 22.5 µs | 165 B (3 allocs) |
-| JSON + 3 middleware + state + param | 24.3 µs | 4,545 B (24 allocs) |
-| Health + 3 middleware | 24.4 µs | 3,697 B (15 allocs) |
-| 10 noop middleware layers | 24.5 µs | 8,767 B (27 allocs) |
-
-The TCP baseline is ~22 µs — that's the kernel TCP stack plus Hyper's HTTP/1.1 parser and response serializer. Harrow's routing adds at most 2 µs on top of that.
-
-404 misses allocate only 165 bytes — we use the zero-allocation `matches()` path that checks existence without capturing param values.
-
-#### Middleware Cost
-
-Each middleware layer costs ~240 ns and ~850 B per request. The cost is dominated by `Box::pin` for the async future plus `Box::new` for the `Next` closure. At 10 layers deep, total middleware overhead is ~2 µs and ~8.7 KB — well within budget.
-
-### Harrow vs Axum
-
-We run identical workloads on both frameworks: same response bodies, same `BenchClient`, same Tokio runtime, same `--release` profile. The only difference is the framework code.
-
-#### Latency Comparison
-
-| Benchmark | Harrow | Axum | Delta |
-|-----------|--------|------|-------|
-| Text echo | 22.7 µs | 27.5 µs | **-17%** |
-| JSON echo | 23.2 µs | 25.0 µs | **-7%** |
-| Param echo | 23.2 µs | 24.9 µs | **-7%** |
-| 404 miss | 22.5 µs | 24.4 µs | **-8%** |
-
-Harrow is 7-17% faster than Axum across all four workloads. The gap is largest on the text echo because there's less handler work to amortize framework overhead against — the text echo isolates pure framework cost.
-
-**Why the latency difference?** Allocations are not free. Each `malloc`/`free` pair costs ~20-50 ns on modern allocators. Axum makes 10+ more allocations per request than Harrow, which accounts for ~200-500 ns of the gap. The remaining difference comes from indirection: every `Box<dyn Trait>` call goes through a vtable pointer, defeating CPU branch prediction and inlining. Harrow's concrete types allow the compiler to inline the response construction path entirely.
-
-#### Memory Comparison
-
-This is where the difference is stark:
-
-| Benchmark | Harrow bytes/op | Axum bytes/op | Ratio |
-|-----------|----------------|---------------|-------|
-| Text echo | 1,487 B (7 allocs) | 9,449 B (17 allocs) | **6.4x less** |
-| JSON echo | 2,281 B (12 allocs) | 10,238 B (23 allocs) | **4.5x less** |
-| Param echo | 1,543 B (10 allocs) | 10,143 B (21 allocs) | **6.6x less** |
-| 404 miss | 165 B (3 allocs) | 9,030 B (12 allocs) | **55x less** |
-
-Harrow allocates 4.5–55x fewer bytes per request than Axum. The 404 case is especially notable: Harrow's zero-alloc miss path means a missed route costs 165 bytes total (just the response construction), while Axum allocates ~9 KB even for a 404.
-
-At 100,000 req/s, Harrow allocates ~150 MB/s for the text echo workload. Axum would allocate ~945 MB/s for the same workload — nearly a gigabyte per second of allocator pressure that the garbage collector (jemalloc or system) must handle.
-
-### Why Axum Allocates ~9 KB Per Request
-
-To understand the full gap, we traced the allocation path through Axum's source code. Every `GET /echo -> "ok"` request hits three unavoidable boxing layers, each a consequence of a specific architectural choice. Body type-erasure was covered in Phase 2, and routing overhead in Phase 3. The remaining major source is service boxing.
-
-#### Service Boxing: `BoxCloneSyncService` (~4 KB)
-
-Every route in Axum is wrapped in Tower's `BoxCloneSyncService`:
-
-```rust
-// axum/src/routing/route.rs, line 31
-pub struct Route<E = Infallible>(BoxCloneSyncService<Request, Response, E>);
-```
-
-And `BoxCloneSyncService` is defined in `tower/src/util/boxed_clone_sync.rs`:
-
-```rust
-pub struct BoxCloneSyncService<T, U, E>(
-    Box<
-        dyn CloneService<T, Response = U, Error = E,
-            Future = BoxFuture<'static, Result<U, E>>>
-            + Send + Sync,
-    >,
-);
-```
-
-This is a double-boxing: the service itself is `Box<dyn CloneService>`, and its future is `BoxFuture` (which is `Pin<Box<dyn Future>>`). Every request dispatch allocates both.
-
-When a request arrives, the route is cloned (line 55: `self.0.get_mut().unwrap().clone().oneshot(req)`) — `clone()` calls `clone_box()`, which allocates *another* `Box<dyn CloneService>`:
-
-```rust
-fn clone_box(&self) -> Box<dyn CloneService<...> + Send + Sync> {
-    Box::new(self.clone())  // heap allocation per request
-}
-```
-
-So per-request: one `Box` for the cloned service, one `Pin<Box>` for the response future. Combined with the data these boxes contain (the handler closure, captured state, future state machine), this is ~4 KB.
-
-**Why Axum does this:** Tower's `Service` trait requires `Clone` for concurrent request handling, but different handlers have different types. `BoxCloneSyncService` erases the handler type so the router can store them uniformly. The `clone()` per request is necessary because `Service::call(&mut self)` takes `&mut self` — you can't share a `&mut` across concurrent requests without cloning.
-
-**What Harrow does instead:** Handlers are stored as `Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>`. The `Fn` trait (not `FnMut`, not `FnOnce`) means handlers are called via shared reference — no cloning needed. The only per-request boxing is the handler's future (`Pin<Box<dyn Future>>`), which is inherent to async dispatch.
-
-#### The Compound Effect
-
-Each layer seems modest in isolation, but they stack:
-
-| Layer | Axum allocs | Harrow equivalent |
-|-------|-------------|-------------------|
-| Request body boxing | `Pin<Box<dyn Body>>` | `Body` (hyper's concrete type) |
-| Response body boxing | `Pin<Box<dyn Body>>` | `Full<Bytes>` (concrete) |
-| Service clone + box | `Box<dyn CloneService>` | None (shared `&Fn`) |
-| Future boxing | `Pin<Box<dyn Future>>` | `Pin<Box<dyn Future>>` (same) |
-| Extensions HashMap | `HashMap<TypeId, Box<dyn Any>>` | Direct field access |
-| URI clone | `String` allocation | No clone needed |
-
-Harrow pays for one future boxing per handler call. Axum pays for five to six boxings. At ~1–2 KB per box (trait object + captured data + alignment), this explains the 6x difference.
-
-#### Is Axum's Approach Wrong?
-
-No. Axum's architecture enables a much more flexible API:
-
-- Handlers can return any type that implements `IntoResponse` — the type erasure is what makes this work
-- Tower middleware is composable, reusable across frameworks (hyper, tonic, axum)
-- `BoxCloneSyncService` enables dynamic middleware stacking without monomorphization explosion
-
-These are real engineering trade-offs. Axum optimizes for **developer ergonomics and ecosystem compatibility**. Harrow optimizes for **minimal per-request overhead**. For most applications, Axum's 9 KB/request is invisible — at 10K req/s it's 90 MB/s of allocator throughput, well within what modern allocators handle. The question is whether *your* workload is allocation-sensitive enough to care.
-
-### The Progression
-
-| Phase | Harrow JSON | Axum JSON | Status |
-|-------|------------|-----------|--------|
-| Phase 1 (Feb 25) | 26.3 µs | ~24.7 µs | Axum 7% faster |
-| Phase 2 (Feb 25) | 24.8 µs | ~24.7 µs | Parity |
-| Phase 4 (Mar 11) | 23.2 µs | 25.0 µs | **Harrow 7% faster** |
-
-From 7% behind to 7% ahead. Not by being clever, but by being precise: measure, identify the allocation, eliminate it, measure again.
-
----
-
-## Flamegraph Analysis
-
-Flamegraphs reveal where CPU time is actually spent during benchmark execution. We generate them using `cargo-flamegraph` (DTrace on macOS).
-
-### Harrow Echo Flamegraph
-
-The `docs/flamegraphs/harrow_echo.svg` flamegraph shows the hot path for Harrow's echo benchmark. Key observations:
-
-- **Hyper dominates.** The widest frames are `hyper::proto::h1` (HTTP/1.1 parsing) and `tokio::io` (TCP read/write). This confirms that Harrow's framework overhead is small relative to the I/O layer.
-- **Route matching is invisible.** `PathPattern::match_path` and `RouteTable::match_route_idx` don't appear as measurable frames — they're too fast relative to TCP.
-- **Allocator frames are minimal.** `__malloc` and `__free` are present but narrow, consistent with our allocation tracking showing <2 KB per request.
-
-### Axum Echo Flamegraph
-
-The `docs/flamegraphs/axum_echo.svg` flamegraph shows Axum's echo benchmark for comparison:
-
-- **Tower service calls** appear as multiple nested frames — `Service::call` at each layer boundary adds indirection.
-- **Body boxing** shows up as `BoxBody` conversion frames that don't exist in Harrow's flamegraph.
-- **Wider allocator frames** consistent with 6x higher allocation count per request.
-
-### How to Read Flamegraphs
-
-- **Width = time.** Wider frames consumed more CPU time.
-- **Depth = call stack.** Deeper means more function call nesting.
-- **Color is arbitrary** — it helps distinguish frames but doesn't encode meaning.
-- **Look for wide frames near the top** — these are the functions where the most time is spent directly (not just transitively).
-
-To generate fresh flamegraphs:
+Session and realistic-stack work:
 
 ```bash
-# Requires: cargo install flamegraph
-# macOS: dtrace available by default (Xcode CLI tools)
-cargo flamegraph --bench echo -o docs/flamegraphs/harrow_echo.svg --root -- --bench
-cargo flamegraph --bench axum_echo -o docs/flamegraphs/axum_echo.svg --root -- --bench
-cargo flamegraph --bench full_stack -o docs/flamegraphs/harrow_full_stack.svg --root -- --bench
+cargo bench -p harrow-bench --bench session -- --noplot
+cargo run --release -p harrow-bench --bin profile-session -- read
+cargo run --release -p harrow-bench --bin profile-session -- write
+cargo run --release -p harrow-bench --bin profile-session -- stack-read
+cargo run --release -p harrow-bench --bin profile-session -- stack-write
 ```
 
----
+Remote throughput artifacts:
 
-## What's Next
+- initial slow run:
+  `docs/perf/c8g.12xlarge/2026-03-19T07-36-57Z/`
+- post-timer fix matched run:
+  `docs/perf/c8g.12xlarge/2026-03-19T13-34-49Z/`
 
-| Target | Expected gain | When |
-|--------|--------------|------|
-| Borrowed param values (`&str` into request path) | ~40 ns per param route | Major API change — not yet |
-| Inline `Next` (avoid `Box<dyn FnOnce>`) | ~10 ns per middleware layer | Diminishing returns |
-| io_uring for TCP (Linux) | Potentially significant for throughput | Requires kernel 5.10+ |
+## What This Document Should Become
 
-The framework is at 2 µs overhead on a 22 µs TCP baseline. We started behind Axum, and ended up 7-17% faster with 4-6x fewer allocations. The remaining optimizations offer sub-50 ns gains — diminishing returns for typical workloads.
+Every time we touch performance-critical code, this file should answer four
+questions:
 
-The progression continues: every PR runs the full benchmark suite, updates `baseline.toml`, and the SVG visualization makes regressions visible at a glance.
+1. What changed?
+2. What numbers moved?
+3. Why do we believe that explanation?
+4. Why did we reject the obvious more-complicated alternative?
 
----
-
-## Visualization and Reproduction
-
-The full visualization is available at `docs/performance.svg`. It contains:
-
-1. **Harrow latency** — all 11 benchmarks, micro and TCP, sorted by latency
-2. **Harrow vs Axum** — side-by-side TCP latency comparison
-3. **Allocation profile** — side-by-side bytes per operation
-4. **Resource budget** — weighted mean latency, max throughput, CPU utilization
-
-Flamegraphs are in `docs/flamegraphs/`:
-
-- `harrow_echo.svg` — Harrow echo benchmark hot path
-- `harrow_full_stack.svg` — Harrow full stack (3 middleware + state + JSON)
-- `axum_echo.svg` — Axum echo benchmark for comparison
-
-### Reproducing These Results
-
-```bash
-# Run all criterion benchmarks
-cargo bench
-
-# Update the TOML baseline from criterion data
-cargo run --bin update-baseline
-
-# Measure per-operation allocations (Harrow + Axum)
-cargo run --release --bin measure-allocs
-
-# Render the SVG visualization
-cargo run --bin render-baseline
-
-# Generate flamegraphs (requires: cargo install flamegraph)
-cargo flamegraph --bench echo -o docs/flamegraphs/harrow_echo.svg --root -- --bench
-cargo flamegraph --bench full_stack -o docs/flamegraphs/harrow_full_stack.svg --root -- --bench
-cargo flamegraph --bench axum_echo -o docs/flamegraphs/axum_echo.svg --root -- --bench
-```
-
-All measurements in this article were taken on Apple Silicon (M-series), macOS, AC power, no background load. TCP benchmarks use a single keep-alive connection over loopback. Your numbers will differ on different hardware, but the relative comparisons should hold.
+If we keep doing that, the performance story stays technical instead of turning
+into mythology.

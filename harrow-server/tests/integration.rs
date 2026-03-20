@@ -11,6 +11,9 @@ extern crate http;
 use harrow_middleware::body_limit::body_limit_middleware;
 use harrow_middleware::o11y::o11y_middleware;
 use harrow_middleware::rate_limit::{HeaderKeyExtractor, InMemoryBackend, rate_limit_middleware};
+use harrow_middleware::session::{
+    InMemorySessionStore, Session, SessionConfig, session_middleware,
+};
 use harrow_middleware::timeout::timeout_middleware;
 use harrow_o11y::O11yConfig;
 use http::StatusCode;
@@ -942,4 +945,138 @@ async fn client_rate_limit_skips_when_key_header_missing() {
             "should not have rate limit headers when key missing"
         );
     }
+}
+
+// ============================================================================
+// Session Middleware (Client)
+// ============================================================================
+
+fn test_secret() -> [u8; 32] {
+    *b"test-secret-key-for-harrow-sess!"
+}
+
+async fn session_set_handler(req: Request) -> Response {
+    let session = req.ext::<Session>().unwrap();
+    session.set("user", "alice");
+    Response::text("set")
+}
+
+async fn session_get_handler(req: Request) -> Response {
+    let session = req.ext::<Session>().unwrap();
+    let user = session.get("user").unwrap_or_default();
+    Response::text(user)
+}
+
+async fn session_destroy_handler(req: Request) -> Response {
+    let session = req.ext::<Session>().unwrap();
+    session.destroy();
+    Response::text("destroyed")
+}
+
+async fn session_noop_handler(req: Request) -> Response {
+    // Access session but don't modify it
+    let session = req.ext::<Session>().unwrap();
+    let _ = session.get("anything");
+    Response::text("noop")
+}
+
+#[tokio::test]
+async fn client_session_round_trip() {
+    let config = SessionConfig::new(test_secret()).secure(false);
+    let client = App::new()
+        .middleware(session_middleware(InMemorySessionStore::new(), config))
+        .get("/set", session_set_handler)
+        .get("/get", session_get_handler)
+        .client();
+
+    // Set session data
+    let resp = client.get("/set").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = resp
+        .header("set-cookie")
+        .expect("expected set-cookie on set");
+    assert!(cookie.contains("sid="));
+
+    // Extract the cookie value (everything before ';')
+    let cookie_val = cookie.split(';').next().unwrap().trim();
+
+    // Send cookie back to read session data
+    let req = http::Request::get("/get")
+        .header("cookie", cookie_val)
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp = client.request(req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.text(), "alice");
+}
+
+#[tokio::test]
+async fn client_session_destroy_clears() {
+    let config = SessionConfig::new(test_secret()).secure(false);
+    let client = App::new()
+        .middleware(session_middleware(InMemorySessionStore::new(), config))
+        .get("/set", session_set_handler)
+        .get("/destroy", session_destroy_handler)
+        .get("/get", session_get_handler)
+        .client();
+
+    // Set data
+    let resp = client.get("/set").await;
+    let cookie = resp.header("set-cookie").unwrap();
+    let cookie_val = cookie.split(';').next().unwrap().trim();
+
+    // Destroy session
+    let req = http::Request::get("/destroy")
+        .header("cookie", cookie_val)
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp = client.request(req).await;
+    assert_eq!(resp.text(), "destroyed");
+    let clear_cookie = resp.header("set-cookie").expect("expected clear cookie");
+    assert!(clear_cookie.contains("Max-Age=0"));
+
+    // Next request with old cookie should see empty session
+    let req = http::Request::get("/get")
+        .header("cookie", cookie_val)
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp = client.request(req).await;
+    assert_eq!(resp.text(), ""); // empty — session data gone
+}
+
+#[tokio::test]
+async fn client_session_no_cookie_on_unmodified() {
+    let config = SessionConfig::new(test_secret()).secure(false);
+    let client = App::new()
+        .middleware(session_middleware(InMemorySessionStore::new(), config))
+        .get("/noop", session_noop_handler)
+        .client();
+
+    let resp = client.get("/noop").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.header("set-cookie").is_none(),
+        "unmodified session should not set cookie"
+    );
+}
+
+#[tokio::test]
+async fn client_session_tampered_cookie_rejected() {
+    let config = SessionConfig::new(test_secret()).secure(false);
+    let client = App::new()
+        .middleware(session_middleware(InMemorySessionStore::new(), config))
+        .get("/get", session_get_handler)
+        .client();
+
+    // Send a tampered cookie
+    let tampered = "sid=abcdef0123456789abcdef0123456789.0000000000000000000000000000000000000000000000000000000000000000";
+    let req = http::Request::get("/get")
+        .header("cookie", tampered)
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp = client.request(req).await;
+    // Should get empty session (no user data)
+    assert_eq!(resp.text(), "");
+    // No set-cookie since session wasn't modified
+    assert!(resp.header("set-cookie").is_none());
 }

@@ -716,6 +716,7 @@ name = "harrow-bench"
 version = "0.2.6"
 dependencies = [
  "axum",
+ "blake3",
  "bytes",
  "criterion",
  "futures-util",
@@ -769,6 +770,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures-util",
+ "getrandom 0.3.4",
  "harrow-core",
  "harrow-o11y",
  "http",

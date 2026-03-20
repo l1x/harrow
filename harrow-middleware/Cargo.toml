@@ -17,6 +17,7 @@ body-limit = []
 compression = ["dep:flate2"]
 compression-br = ["compression", "dep:brotli"]
 rate-limit = ["dep:dashmap", "dep:tokio"]
+session = ["dep:blake3", "dep:dashmap", "dep:getrandom", "dep:tokio"]
 
 [dependencies]
 harrow-core = { workspace = true }
@@ -34,6 +35,7 @@ futures-util = { workspace = true, optional = true }
 flate2 = { version = "1", optional = true }
 brotli = { version = "7", optional = true }
 dashmap = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

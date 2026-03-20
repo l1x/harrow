@@ -21,3 +21,6 @@ pub mod compression;
 
 #[cfg(feature = "rate-limit")]
 pub mod rate_limit;
+
+#[cfg(feature = "session")]
+pub mod session;

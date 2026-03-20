@@ -109,6 +109,18 @@ impl Response {
         self
     }
 
+    /// Append a header value without overwriting existing values.
+    /// Needed for headers like `set-cookie` that can appear multiple times.
+    pub fn append_header(mut self, name: &str, value: &str) -> Self {
+        if let (Ok(name), Ok(value)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::header::HeaderValue::from_str(value),
+        ) {
+            self.inner.headers_mut().append(name, value);
+        }
+        self
+    }
+
     fn set_header(&mut self, name: &str, value: &str) {
         if let (Ok(name), Ok(value)) = (
             http::header::HeaderName::from_bytes(name.as_bytes()),
@@ -330,6 +342,21 @@ mod tests {
         let resp = Response::ok().header("x-custom", "value");
         let inner = resp.into_inner();
         assert_eq!(inner.headers().get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn append_header_adds_multiple_values() {
+        let resp = Response::ok()
+            .append_header("set-cookie", "a=1")
+            .append_header("set-cookie", "b=2");
+        let inner = resp.into_inner();
+        let values: Vec<&str> = inner
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(values, vec!["a=1", "b=2"]);
     }
 
     #[test]

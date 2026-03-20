@@ -5,12 +5,14 @@
 
 pub mod perf_summary;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use harrow::{App, Next, Request, Response};
+use harrow::{App, Next, Request, Response, SessionStore};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -206,6 +208,73 @@ pub async fn timing_middleware(req: Request, next: Next) -> Response {
 pub async fn group_tag_middleware(req: Request, next: Next) -> Response {
     let resp = next.run(req).await;
     resp.header("x-group", "1")
+}
+
+// ---------------------------------------------------------------------------
+// Session benchmark helpers
+// ---------------------------------------------------------------------------
+
+pub const BENCH_SESSION_SECRET: [u8; 32] = *b"harrow-bench-session-secret-key!";
+pub const BENCH_SESSION_ID: &str = "00000000000000001111111111111111";
+pub const BODY_1KB_TEXT: &str = include_str!("../benches/body_1kb.txt");
+
+pub fn bench_session_cookie() -> String {
+    let mac = blake3::keyed_hash(&BENCH_SESSION_SECRET, BENCH_SESSION_ID.as_bytes());
+    format!("sid={BENCH_SESSION_ID}.{}", mac.to_hex())
+}
+
+pub fn bench_session_config() -> harrow::SessionConfig {
+    harrow::SessionConfig::new(BENCH_SESSION_SECRET).secure(false)
+}
+
+pub async fn seed_bench_session<S: SessionStore>(store: &S) {
+    let mut data = HashMap::new();
+    data.insert("user".to_string(), "bench".to_string());
+    store
+        .save(BENCH_SESSION_ID, &data, Duration::from_secs(86400))
+        .await;
+}
+
+pub async fn large_text_handler(_req: Request) -> Response {
+    Response::text(BODY_1KB_TEXT)
+}
+
+pub async fn session_no_touch_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    let _ = session.get("user");
+    Response::text("ok")
+}
+
+pub async fn session_set_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    session.set("user", "bench");
+    Response::text("ok")
+}
+
+pub async fn session_get_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    let _ = session.get("user");
+    Response::text("ok")
+}
+
+pub async fn session_write_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    let _ = session.get("user");
+    session.set("counter", "1");
+    Response::text("ok")
+}
+
+pub async fn session_large_get_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    let _ = session.get("user");
+    Response::text(BODY_1KB_TEXT)
+}
+
+pub async fn session_large_write_handler(req: Request) -> Response {
+    let session = req.ext::<harrow::Session>().unwrap();
+    let _ = session.get("user");
+    session.set("counter", "1");
+    Response::text(BODY_1KB_TEXT)
 }
 
 // ---------------------------------------------------------------------------

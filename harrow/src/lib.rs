@@ -37,6 +37,12 @@ pub use harrow_middleware::rate_limit::{
     RateLimitMiddleware, RateLimitOutcome, rate_limit_middleware,
 };
 
+#[cfg(feature = "session")]
+pub use harrow_middleware::session::{
+    InMemorySessionStore, SameSite, Session, SessionConfig, SessionMiddleware, SessionStore,
+    session_middleware,
+};
+
 #[cfg(feature = "o11y")]
 pub mod o11y {
     pub use harrow_middleware::o11y::o11y_middleware;

@@ -6,6 +6,102 @@ cpu = "Apple M-series"
 rust_version = "1.85.0"
 notes = "Post BoxBody refactor. Measured on AC power, no background load."
 
+[benchmarks.axum_from_fn_json_1kb_0]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_0"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_0"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13904
+alloc_count = 153
+
+[benchmarks.axum_from_fn_json_1kb_1]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_1"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_1"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 15128
+alloc_count = 159
+
+[benchmarks.axum_from_fn_json_1kb_10]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_10"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_10"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 27584
+alloc_count = 303
+
+[benchmarks.axum_from_fn_json_1kb_2]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_2"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_2"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 16384
+alloc_count = 167
+
+[benchmarks.axum_from_fn_json_1kb_3]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_3"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_3"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 17672
+alloc_count = 177
+
+[benchmarks.axum_from_fn_json_1kb_5]
+criterion_path = "alloc_only/axum_from_fn_json_1kb_5"
+description = "Allocation-only benchmark: axum_from_fn_json_1kb_5"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 20344
+alloc_count = 203
+
+[benchmarks.axum_from_fn_text_0]
+criterion_path = "alloc_only/axum_from_fn_text_0"
+description = "Allocation-only benchmark: axum_from_fn_text_0"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 1052
+alloc_count = 14
+
+[benchmarks.axum_from_fn_text_1]
+criterion_path = "alloc_only/axum_from_fn_text_1"
+description = "Allocation-only benchmark: axum_from_fn_text_1"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 2276
+alloc_count = 20
+
+[benchmarks.axum_from_fn_text_10]
+criterion_path = "alloc_only/axum_from_fn_text_10"
+description = "Allocation-only benchmark: axum_from_fn_text_10"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 14732
+alloc_count = 164
+
+[benchmarks.axum_from_fn_text_2]
+criterion_path = "alloc_only/axum_from_fn_text_2"
+description = "Allocation-only benchmark: axum_from_fn_text_2"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 3532
+alloc_count = 28
+
+[benchmarks.axum_from_fn_text_3]
+criterion_path = "alloc_only/axum_from_fn_text_3"
+description = "Allocation-only benchmark: axum_from_fn_text_3"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 4820
+alloc_count = 38
+
+[benchmarks.axum_from_fn_text_5]
+criterion_path = "alloc_only/axum_from_fn_text_5"
+description = "Allocation-only benchmark: axum_from_fn_text_5"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 7492
+alloc_count = 64
+
 [benchmarks.dispatch_json_1kb_0]
 criterion_path = "middleware_dispatch/json_1kb/0"
 description = "In-process dispatch, JSON 1KB, 0 noop middleware"
@@ -198,6 +294,30 @@ median_ns = 141.94283771423068
 alloc_bytes = 271
 alloc_count = 4
 
+[benchmarks.realistic_stack_baseline]
+criterion_path = "alloc_only/realistic_stack_baseline"
+description = "Allocation-only benchmark: realistic_stack_baseline"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 10298
+alloc_count = 18
+
+[benchmarks.realistic_stack_read]
+criterion_path = "alloc_only/realistic_stack_read"
+description = "Allocation-only benchmark: realistic_stack_read"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 369043
+alloc_count = 69
+
+[benchmarks.realistic_stack_write]
+criterion_path = "alloc_only/realistic_stack_write"
+description = "Allocation-only benchmark: realistic_stack_write"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 370357
+alloc_count = 91
+
 [benchmarks.route_lookup_100]
 criterion_path = "route_table_lookup/worst_case/100"
 description = "Route table lookup, worst case, 100 routes"
@@ -205,6 +325,142 @@ mean_ns = 85.27217296422668
 median_ns = 85.12678850883077
 alloc_bytes = 52
 alloc_count = 3
+
+[benchmarks.session_existing_read]
+criterion_path = "alloc_only/session_existing_read"
+description = "Allocation-only benchmark: session_existing_read"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 12108
+alloc_count = 31
+
+[benchmarks.session_existing_write]
+criterion_path = "alloc_only/session_existing_write"
+description = "Allocation-only benchmark: session_existing_write"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13422
+alloc_count = 53
+
+[benchmarks.session_new]
+criterion_path = "alloc_only/session_new"
+description = "Allocation-only benchmark: session_new"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 12996
+alloc_count = 37
+
+[benchmarks.session_no_touch]
+criterion_path = "alloc_only/session_no_touch"
+description = "Allocation-only benchmark: session_no_touch"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 11214
+alloc_count = 19
+
+[benchmarks.session_read_plus_noop]
+criterion_path = "alloc_only/session_read_plus_noop"
+description = "Allocation-only benchmark: session_read_plus_noop"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 12836
+alloc_count = 33
+
+[benchmarks.tower_noop_json_1kb_0]
+criterion_path = "alloc_only/tower_noop_json_1kb_0"
+description = "Allocation-only benchmark: tower_noop_json_1kb_0"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_json_1kb_1]
+criterion_path = "alloc_only/tower_noop_json_1kb_1"
+description = "Allocation-only benchmark: tower_noop_json_1kb_1"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_json_1kb_10]
+criterion_path = "alloc_only/tower_noop_json_1kb_10"
+description = "Allocation-only benchmark: tower_noop_json_1kb_10"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_json_1kb_2]
+criterion_path = "alloc_only/tower_noop_json_1kb_2"
+description = "Allocation-only benchmark: tower_noop_json_1kb_2"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_json_1kb_3]
+criterion_path = "alloc_only/tower_noop_json_1kb_3"
+description = "Allocation-only benchmark: tower_noop_json_1kb_3"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_json_1kb_5]
+criterion_path = "alloc_only/tower_noop_json_1kb_5"
+description = "Allocation-only benchmark: tower_noop_json_1kb_5"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 13542
+alloc_count = 143
+
+[benchmarks.tower_noop_text_0]
+criterion_path = "alloc_only/tower_noop_text_0"
+description = "Allocation-only benchmark: tower_noop_text_0"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
+
+[benchmarks.tower_noop_text_1]
+criterion_path = "alloc_only/tower_noop_text_1"
+description = "Allocation-only benchmark: tower_noop_text_1"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
+
+[benchmarks.tower_noop_text_10]
+criterion_path = "alloc_only/tower_noop_text_10"
+description = "Allocation-only benchmark: tower_noop_text_10"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
+
+[benchmarks.tower_noop_text_2]
+criterion_path = "alloc_only/tower_noop_text_2"
+description = "Allocation-only benchmark: tower_noop_text_2"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
+
+[benchmarks.tower_noop_text_3]
+criterion_path = "alloc_only/tower_noop_text_3"
+description = "Allocation-only benchmark: tower_noop_text_3"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
+
+[benchmarks.tower_noop_text_5]
+criterion_path = "alloc_only/tower_noop_text_5"
+description = "Allocation-only benchmark: tower_noop_text_5"
+mean_ns = 0.0
+median_ns = 0.0
+alloc_bytes = 693
+alloc_count = 4
 
 [axum_benchmarks.echo_404]
 criterion_path = "axum_echo_tcp/404_miss"
