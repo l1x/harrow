@@ -181,6 +181,7 @@ impl fmt::Debug for PathPattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn exact_match() {
@@ -234,5 +235,216 @@ mod tests {
         let p = PathPattern::parse("/files/*path");
         assert!(p.matches("/files/a/b/c.txt"));
         assert!(p.matches("/files/x"));
+    }
+
+    // -----------------------------------------------------------------------
+    // proptest strategies
+    // -----------------------------------------------------------------------
+
+    fn arb_literal() -> impl Strategy<Value = Segment> {
+        "[a-z]{1,8}".prop_map(Segment::Literal)
+    }
+
+    fn arb_param() -> impl Strategy<Value = Segment> {
+        "[a-z]{1,5}".prop_map(Segment::Param)
+    }
+
+    fn arb_glob() -> impl Strategy<Value = Segment> {
+        "[a-z]{1,5}".prop_map(Segment::Glob)
+    }
+
+    fn arb_non_glob_segment() -> impl Strategy<Value = Segment> {
+        prop_oneof![arb_literal(), arb_param(),]
+    }
+
+    /// Generate a valid pattern: 1-4 segments, glob only at end if present.
+    /// Param/glob names are made unique by appending a positional suffix.
+    fn arb_pattern() -> impl Strategy<Value = Vec<Segment>> {
+        // 80% without glob, 20% with glob at end
+        prop_oneof![
+            4 => prop::collection::vec(arb_non_glob_segment(), 1..=4)
+                .prop_map(uniquify_names),
+            1 => (prop::collection::vec(arb_non_glob_segment(), 0..=3), arb_glob())
+                .prop_map(|(mut segs, glob)| { segs.push(glob); uniquify_names(segs) }),
+        ]
+    }
+
+    /// Make param/glob names unique by appending a positional index.
+    fn uniquify_names(segments: Vec<Segment>) -> Vec<Segment> {
+        segments
+            .into_iter()
+            .enumerate()
+            .map(|(i, seg)| match seg {
+                Segment::Param(name) => Segment::Param(format!("{name}{i}")),
+                Segment::Glob(name) => Segment::Glob(format!("{name}{i}")),
+                other => other,
+            })
+            .collect()
+    }
+
+    /// Build a PathPattern from a Vec<Segment>.
+    fn pattern_from_segments(segments: &[Segment]) -> PathPattern {
+        let raw: String = segments
+            .iter()
+            .map(|s| match s {
+                Segment::Literal(l) => format!("/{l}"),
+                Segment::Param(p) => format!("/:{p}"),
+                Segment::Glob(g) => format!("/*{g}"),
+            })
+            .collect();
+        let raw = if raw.is_empty() { "/".to_string() } else { raw };
+        PathPattern::parse(&raw)
+    }
+
+    /// Generate a path that should match the given pattern.
+    fn arb_path_for_pattern(segments: &[Segment]) -> BoxedStrategy<String> {
+        let strategies: Vec<BoxedStrategy<String>> = segments
+            .iter()
+            .map(|seg| match seg {
+                Segment::Literal(lit) => Just(lit.clone()).boxed(),
+                Segment::Param(_) => "[a-z0-9]{1,8}".prop_map(|s| s).boxed(),
+                Segment::Glob(_) => prop::collection::vec("[a-z0-9]{1,8}", 0..=3)
+                    .prop_map(|parts| parts.join("/"))
+                    .boxed(),
+            })
+            .collect();
+
+        strategies
+            .into_iter()
+            .fold(Just(String::new()).boxed(), |acc, seg_strat| {
+                (acc, seg_strat)
+                    .prop_map(|(mut path, seg)| {
+                        path.push('/');
+                        path.push_str(&seg);
+                        path
+                    })
+                    .boxed()
+            })
+    }
+
+    /// Generate a random path for agreement tests.
+    fn arb_random_path() -> impl Strategy<Value = String> {
+        prop::collection::vec("[a-z0-9]{1,8}", 0..=5).prop_map(|parts| {
+            if parts.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", parts.join("/"))
+            }
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // proptest properties
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        /// match_path and matches must always agree.
+        #[test]
+        fn proptest_match_path_matches_agreement(
+            segments in arb_pattern(),
+            path in arb_random_path(),
+        ) {
+            let pattern = pattern_from_segments(&segments);
+            let has_match = pattern.match_path(&path).is_some();
+            let matches = pattern.matches(&path);
+            prop_assert_eq!(
+                has_match, matches,
+                "disagreement on pattern={} path={}", pattern.as_str(), path,
+            );
+        }
+
+        /// For a pattern with params and a matching path, captured values
+        /// correspond to the path segments at the param positions.
+        #[test]
+        fn proptest_param_capture_correctness(segments in arb_pattern()) {
+            let pattern = pattern_from_segments(&segments);
+            // Use a deterministic matching path
+            let path_strategy = arb_path_for_pattern(&segments);
+            proptest::test_runner::TestRunner::default()
+                .run(&path_strategy, |path| {
+                    if let Some(m) = pattern.match_path(&path) {
+                        let path_parts: Vec<&str> = path
+                            .trim_start_matches('/')
+                            .split('/')
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let mut pi = 0;
+                        for seg in &segments {
+                            match seg {
+                                Segment::Literal(_) => { pi += 1; }
+                                Segment::Param(name) => {
+                                    prop_assert_eq!(
+                                        m.get(name).unwrap(),
+                                        path_parts[pi],
+                                        "param {} mismatch", name,
+                                    );
+                                    pi += 1;
+                                }
+                                Segment::Glob(name) => {
+                                    let expected = path_parts[pi..].join("/");
+                                    prop_assert_eq!(
+                                        m.get(name).unwrap(),
+                                        &expected,
+                                        "glob {} mismatch", name,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+        }
+
+        /// A path whose first literal differs from the pattern never matches.
+        #[test]
+        fn proptest_non_matching_first_literal(
+            segments in arb_pattern(),
+        ) {
+            // Only test patterns that start with a literal
+            if let Some(Segment::Literal(lit)) = segments.first() {
+                let pattern = pattern_from_segments(&segments);
+                // Build a path that starts with a different literal
+                let bad_first = format!("{}x", lit);
+                let bad_path = format!("/{}", bad_first);
+                prop_assert!(
+                    pattern.match_path(&bad_path).is_none(),
+                    "pattern={} should not match path={}",
+                    pattern.as_str(),
+                    bad_path,
+                );
+            }
+        }
+
+        /// For patterns ending in a glob, the glob value equals
+        /// the joined remaining path segments.
+        #[test]
+        fn proptest_glob_captures_remainder(
+            segments in (prop::collection::vec(arb_non_glob_segment(), 0..=2), arb_glob())
+                .prop_map(|(mut segs, glob)| { segs.push(glob); segs }),
+        ) {
+            let pattern = pattern_from_segments(&segments);
+            let path_strategy = arb_path_for_pattern(&segments);
+            proptest::test_runner::TestRunner::default()
+                .run(&path_strategy, |path| {
+                    if let Some(m) = pattern.match_path(&path)
+                        && let Some(Segment::Glob(name)) = segments.last()
+                    {
+                        let path_parts: Vec<&str> = path
+                            .trim_start_matches('/')
+                            .split('/')
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        // Glob starts after all non-glob segments
+                        let prefix_len = segments.len() - 1;
+                        let expected = path_parts[prefix_len..].join("/");
+                        prop_assert_eq!(
+                            m.get(name).unwrap(),
+                            &expected,
+                            "glob remainder mismatch",
+                        );
+                    }
+                    Ok(())
+                })?;
+        }
     }
 }

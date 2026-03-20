@@ -29,3 +29,4 @@ hyper-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
+proptest = { workspace = true }

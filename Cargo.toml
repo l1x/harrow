@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["harrow-core/fuzz"]
 members = [
     "harrow",
     "harrow-core",
@@ -45,6 +46,7 @@ brotli = "7"
 blake3 = "1"
 mimalloc = "0.1"
 dashmap = "6"
+proptest = "1"
 
 [profile.bench]
 debug = true

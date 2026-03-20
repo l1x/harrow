@@ -43,3 +43,4 @@ tracing-subscriber = { workspace = true }
 harrow-o11y = { workspace = true }
 http-body-util = { workspace = true }
 futures-util = { workspace = true }
+proptest = { workspace = true }

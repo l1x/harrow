@@ -313,9 +313,11 @@ impl<K: KeyExtractor, B: RateLimitBackend> Middleware for RateLimitMiddleware<K,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::FutureExt;
     use harrow_core::middleware::Middleware;
     use harrow_core::path::PathMatch;
     use harrow_core::state::TypeMap;
+    use proptest::prelude::*;
     use std::sync::Arc;
 
     fn make_request(headers: &[(&str, &str)]) -> Request {
@@ -517,5 +519,117 @@ mod tests {
         assert_eq!(ns_to_secs_ceil(1_000_000_000), 1);
         assert_eq!(ns_to_secs_ceil(1_000_000_001), 2);
         assert_eq!(ns_to_secs_ceil(2_500_000_000), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // proptest properties for GCRA
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        /// The first `burst` calls to check() are all allowed.
+        #[test]
+        fn proptest_burst_allows_first_n(
+            rate in 1u64..=1000,
+            burst_ratio in 1u64..=100,
+        ) {
+            let burst = burst_ratio.min(rate);
+            let backend = InMemoryBackend::per_second(rate).burst(burst);
+            for i in 0..burst {
+                let outcome = backend.check("k").now_or_never().unwrap();
+                prop_assert!(
+                    outcome.allowed,
+                    "request {} should be allowed (rate={}, burst={})",
+                    i, rate, burst,
+                );
+            }
+        }
+
+        /// After exhausting the burst, request burst+1 is denied
+        /// with retry_after_ns > 0.
+        #[test]
+        fn proptest_burst_plus_one_denied(
+            rate in 1u64..=1000,
+            burst_ratio in 1u64..=100,
+        ) {
+            let burst = burst_ratio.min(rate);
+            let backend = InMemoryBackend::per_second(rate).burst(burst);
+            // Exhaust burst
+            for _ in 0..burst {
+                let _ = backend.check("k").now_or_never().unwrap();
+            }
+            let outcome = backend.check("k").now_or_never().unwrap();
+            prop_assert!(
+                !outcome.allowed,
+                "request after burst should be denied (rate={}, burst={})",
+                rate, burst,
+            );
+            prop_assert!(
+                outcome.retry_after_ns > 0,
+                "retry_after_ns should be > 0 when denied",
+            );
+        }
+
+        /// For consecutive allowed requests, `remaining` is non-increasing.
+        #[test]
+        fn proptest_remaining_monotonicity(
+            rate in 2u64..=500,
+            burst_ratio in 2u64..=100,
+        ) {
+            let burst = burst_ratio.min(rate);
+            let backend = InMemoryBackend::per_second(rate).burst(burst);
+            let mut prev_remaining = u64::MAX;
+            for _ in 0..burst {
+                let outcome = backend.check("k").now_or_never().unwrap();
+                if !outcome.allowed { break; }
+                prop_assert!(
+                    outcome.remaining <= prev_remaining,
+                    "remaining should be non-increasing: {} > {}",
+                    outcome.remaining, prev_remaining,
+                );
+                prev_remaining = outcome.remaining;
+            }
+        }
+
+        /// Requests to key "a" do not affect key "b".
+        #[test]
+        fn proptest_key_independence(
+            rate in 1u64..=1000,
+            burst_ratio in 1u64..=100,
+        ) {
+            let burst = burst_ratio.min(rate);
+            let backend = InMemoryBackend::per_second(rate).burst(burst);
+            // Exhaust burst on key "a"
+            for _ in 0..burst {
+                let _ = backend.check("a").now_or_never().unwrap();
+            }
+            let denied = backend.check("a").now_or_never().unwrap();
+            prop_assert!(!denied.allowed, "key 'a' should be exhausted");
+            // Key "b" should still be allowed
+            let outcome = backend.check("b").now_or_never().unwrap();
+            prop_assert!(
+                outcome.allowed,
+                "key 'b' should be independent of key 'a'",
+            );
+        }
+
+        /// For any allowed request, remaining <= burst.
+        #[test]
+        fn proptest_remaining_within_burst(
+            rate in 1u64..=1000,
+            burst_ratio in 1u64..=100,
+        ) {
+            let burst = burst_ratio.min(rate);
+            let backend = InMemoryBackend::per_second(rate).burst(burst);
+            for _ in 0..burst {
+                let outcome = backend.check("k").now_or_never().unwrap();
+                if outcome.allowed {
+                    prop_assert!(
+                        outcome.remaining <= burst,
+                        "remaining {} > burst {} (rate={})",
+                        outcome.remaining, burst, rate,
+                    );
+                }
+            }
+        }
     }
 }
