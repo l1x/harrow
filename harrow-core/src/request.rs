@@ -8,7 +8,7 @@ use http_body_util::combinators::BoxBody;
 use percent_encoding::percent_decode_str;
 
 use crate::path::PathMatch;
-use crate::state::TypeMap;
+use crate::state::{MissingExtError, TypeMap};
 
 /// Type-erased request body. Allows constructing requests from any body type
 /// (hyper `Incoming`, `Full<Bytes>`, etc.) without coupling to a specific impl.
@@ -140,6 +140,23 @@ impl Request {
     /// Returns `None` if `T` was not registered via `App::state()`.
     pub fn try_state<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.state.try_get::<T>()
+    }
+
+    /// Insert per-request data. Used by middleware to pass data to handlers.
+    pub fn set_ext<T: Clone + Send + Sync + 'static>(&mut self, val: T) {
+        self.inner.extensions_mut().insert(val);
+    }
+
+    /// Get per-request data inserted by middleware.
+    pub fn ext<T: Clone + Send + Sync + 'static>(&self) -> Option<&T> {
+        self.inner.extensions().get::<T>()
+    }
+
+    /// Get per-request data, returning an error if missing.
+    pub fn require_ext<T: Clone + Send + Sync + 'static>(&self) -> Result<&T, MissingExtError> {
+        self.ext::<T>().ok_or(MissingExtError {
+            type_name: std::any::type_name::<T>(),
+        })
     }
 
     /// The route pattern that matched this request (e.g. `/users/:id`).
@@ -696,5 +713,103 @@ mod tests {
     async fn body_error_body_read_display() {
         let err = BodyError::BodyRead("connection reset".to_string());
         assert_eq!(err.to_string(), "body read error: connection reset");
+    }
+
+    #[tokio::test]
+    async fn set_ext_and_ext_round_trips() {
+        let mut req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        req.set_ext(42u32);
+        assert_eq!(req.ext::<u32>(), Some(&42));
+    }
+
+    #[tokio::test]
+    async fn ext_returns_none_when_missing() {
+        let req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        assert!(req.ext::<u32>().is_none());
+    }
+
+    #[tokio::test]
+    async fn require_ext_returns_ok_when_present() {
+        let mut req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        req.set_ext("hello".to_string());
+        assert_eq!(req.require_ext::<String>().unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn require_ext_returns_err_when_missing() {
+        let req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        let err = req.require_ext::<u64>().unwrap_err();
+        assert!(err.to_string().contains("was not set by middleware"));
+    }
+
+    #[tokio::test]
+    async fn set_ext_overwrites_previous_value() {
+        let mut req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        req.set_ext(1u32);
+        req.set_ext(2u32);
+        assert_eq!(req.ext::<u32>(), Some(&2));
+    }
+
+    #[tokio::test]
+    async fn ext_multiple_types_coexist() {
+        let mut req = test_util::make_request(
+            "GET",
+            "/",
+            &[],
+            None,
+            PathMatch::default(),
+            TypeMap::new(),
+            None,
+        )
+        .await;
+        req.set_ext(42u32);
+        req.set_ext("hello".to_string());
+        assert_eq!(req.ext::<u32>(), Some(&42));
+        assert_eq!(req.ext::<String>().unwrap(), "hello");
     }
 }

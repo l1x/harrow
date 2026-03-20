@@ -21,6 +21,24 @@ impl fmt::Display for MissingStateError {
 
 impl std::error::Error for MissingStateError {}
 
+/// Error returned when a required per-request extension is not present.
+#[derive(Debug)]
+pub struct MissingExtError {
+    pub(crate) type_name: &'static str,
+}
+
+impl fmt::Display for MissingExtError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "harrow: per-request extension `{}` was not set by middleware.",
+            self.type_name
+        )
+    }
+}
+
+impl std::error::Error for MissingExtError {}
+
 /// A type-erased map keyed by `TypeId`.
 /// Used for application state injection.
 #[derive(Default)]
