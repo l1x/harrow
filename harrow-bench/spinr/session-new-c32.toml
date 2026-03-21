@@ -1,0 +1,7 @@
+[[scenario]]
+name = "session-new-c32"
+url = "http://{{ server }}/session/set"
+connections = 32
+max_throughput = true
+duration = {{ duration }}
+warmup = {{ warmup }}

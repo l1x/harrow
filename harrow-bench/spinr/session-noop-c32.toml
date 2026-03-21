@@ -1,0 +1,7 @@
+[[scenario]]
+name = "session-noop-c32"
+url = "http://{{ server }}/session/noop"
+connections = 32
+max_throughput = true
+duration = {{ duration }}
+warmup = {{ warmup }}

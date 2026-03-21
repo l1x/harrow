@@ -13,9 +13,15 @@
 //!   /msgpack/10kb
 //!   /health
 //!
+//! With `--session`:
+//!   /session/noop
+//!   /session/set
+//!   /session/get
+//!   /session/write
+//!
 //! Optional `--o11y` flag enables observability middleware globally.
 //!
-//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y]
+//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session]
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -26,11 +32,12 @@ use harrow_bench::{
     msgpack_10kb_handler, msgpack_small_handler, text_handler,
 };
 
-fn parse_args() -> (String, u16, bool) {
+fn parse_args() -> (String, u16, bool, bool) {
     let args: Vec<String> = std::env::args().collect();
     let mut bind = "127.0.0.1".to_string();
     let mut port: u16 = 3090;
     let mut o11y = false;
+    let mut session = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -50,19 +57,25 @@ fn parse_args() -> (String, u16, bool) {
                 o11y = true;
                 i += 1;
             }
+            "--session" => {
+                session = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown option: {other}");
-                eprintln!("usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y]");
+                eprintln!(
+                    "usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session]"
+                );
                 std::process::exit(1);
             }
         }
     }
-    (bind, port, o11y)
+    (bind, port, o11y, session)
 }
 
 #[tokio::main]
 async fn main() {
-    let (bind, port, o11y) = parse_args();
+    let (bind, port, o11y, session) = parse_args();
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
     let mut app = App::new()
@@ -74,6 +87,26 @@ async fn main() {
         .get("/msgpack/1kb", msgpack_1kb_handler)
         .get("/msgpack/10kb", msgpack_10kb_handler)
         .get("/health", health);
+
+    if session {
+        use harrow::{InMemorySessionStore, session_middleware};
+        use harrow_bench::{
+            bench_session_config, seed_bench_session, session_get_handler,
+            session_no_touch_handler, session_set_handler, session_write_handler,
+        };
+
+        let store = InMemorySessionStore::new();
+        seed_bench_session(&store).await;
+
+        app = app
+            .middleware(session_middleware(store, bench_session_config()))
+            .get("/session/noop", session_no_touch_handler)
+            .get("/session/set", session_set_handler)
+            .get("/session/get", session_get_handler)
+            .get("/session/write", session_write_handler);
+
+        eprintln!("session middleware enabled (4 session routes)");
+    }
 
     if o11y {
         let otlp_endpoint =

@@ -1,0 +1,10 @@
+[[scenario]]
+name = "session-write-c128"
+url = "http://{{ server }}/session/write"
+connections = 128
+max_throughput = true
+duration = {{ duration }}
+warmup = {{ warmup }}
+
+[scenario.headers]
+Cookie = "sid=00000000000000001111111111111111.8087963058b4ac62ee1bed1887ad691ca6c5af4fe478ceff97e8cb39e712b0bc"

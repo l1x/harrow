@@ -5,12 +5,18 @@
 //! - client node runs `spinr` either in Docker or directly on the host
 //! - optional host telemetry plus `perf stat` / `perf record` are collected per run
 //!
-//! The runner is intentionally small and explicit: each invocation selects one
-//! or more named test cases and runs Harrow/Axum back-to-back for each case.
+//! Each invocation takes one or more `--config <path>` arguments pointing to
+//! spinr TOML templates.  The orchestrator renders `{{ server }}`, `{{ duration }}`
+//! and `{{ warmup }}` placeholders, uploads the result to the client, and runs
+//! `spinr bench <file> -j`.
+//!
+//! Session configs are auto-detected by filename prefix (`session-`).  These run
+//! Harrow-only with `--session` passed to the perf server.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,71 +28,34 @@ const SSH_USER: &str = "alpine";
 const DEFAULT_SPINR_BIN: &str = "/usr/local/bin/spinr";
 const SLEEP_BETWEEN_RUNS: Duration = Duration::from_secs(2);
 const MONITOR_MARGIN_SECS: u32 = 2;
-// AWS guests in this setup do not expose the hardware PMU, so stick to
-// software counters that are available under virtualization.
 const PERF_COUNTERS: &str =
     "task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults";
 const PERF_RECORD_FREQ_HZ: u32 = 1000;
 const PERF_RECORD_CALL_GRAPH: &str = "fp";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TestCase {
-    name: &'static str,
-    path: &'static str,
-    key_label: &'static str,
-    concurrency: u32,
+// ---------------------------------------------------------------------------
+// Template rendering — the only "parsing" the orchestrator does
+// ---------------------------------------------------------------------------
+
+fn render_template(raw: &str, server: &str, duration: u32, warmup: u32) -> String {
+    raw.replace("{{ server }}", server)
+        .replace("{{ duration }}", &duration.to_string())
+        .replace("{{ warmup }}", &warmup.to_string())
 }
 
-const TEST_CASES: &[TestCase] = &[
-    TestCase {
-        name: "text-c32",
-        path: "text",
-        key_label: "text",
-        concurrency: 32,
-    },
-    TestCase {
-        name: "text-c128",
-        path: "text",
-        key_label: "text",
-        concurrency: 128,
-    },
-    TestCase {
-        name: "json-1kb-c32",
-        path: "json/1kb",
-        key_label: "json_1kb",
-        concurrency: 32,
-    },
-    TestCase {
-        name: "json-1kb-c128",
-        path: "json/1kb",
-        key_label: "json_1kb",
-        concurrency: 128,
-    },
-    TestCase {
-        name: "json-10kb-c32",
-        path: "json/10kb",
-        key_label: "json_10kb",
-        concurrency: 32,
-    },
-    TestCase {
-        name: "json-10kb-c128",
-        path: "json/10kb",
-        key_label: "json_10kb",
-        concurrency: 128,
-    },
-    TestCase {
-        name: "msgpack-1kb-c32",
-        path: "msgpack/1kb",
-        key_label: "msgpack_1kb",
-        concurrency: 32,
-    },
-    TestCase {
-        name: "msgpack-1kb-c128",
-        path: "msgpack/1kb",
-        key_label: "msgpack_1kb",
-        concurrency: 128,
-    },
-];
+fn is_session_config(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.starts_with("session-"))
+}
+
+fn config_name(path: &Path) -> String {
+    path.file_stem().unwrap().to_string_lossy().into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SpinrMode {
@@ -188,10 +157,15 @@ impl Framework {
         }
     }
 
-    fn launch_cmd(self, port: u16) -> String {
-        match self {
+    fn launch_cmd(self, port: u16, extra_flags: &str) -> String {
+        let base = match self {
             Self::Harrow => format!("/harrow-perf-server --bind 0.0.0.0 --port {port}"),
             Self::Axum => format!("/axum-perf-server --bind 0.0.0.0 --port {port}"),
+        };
+        if extra_flags.is_empty() {
+            base
+        } else {
+            format!("{base} {extra_flags}")
         }
     }
 
@@ -210,6 +184,10 @@ impl Framework {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Args
+// ---------------------------------------------------------------------------
+
 struct Args {
     server_ssh: String,
     client_ssh: String,
@@ -219,8 +197,9 @@ struct Args {
     port: u16,
     duration: u32,
     warmup: u32,
-    results_dir: std::path::PathBuf,
-    test_cases: Vec<TestCase>,
+    results_dir: PathBuf,
+    config_paths: Vec<PathBuf>,
+    server_flags: Option<String>,
     os_monitors: bool,
     perf_enabled: bool,
     perf_mode: PerfMode,
@@ -252,32 +231,9 @@ fn perf_scope_label(args: &Args) -> String {
     }
 }
 
-fn find_test_case(name: &str) -> Option<TestCase> {
-    TEST_CASES.iter().copied().find(|case| case.name == name)
-}
-
-fn supported_test_case_names() -> String {
-    TEST_CASES
-        .iter()
-        .map(|case| case.name)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn print_supported_test_cases_and_exit() -> ! {
-    println!("Supported test cases:");
-    for case in TEST_CASES {
-        println!(
-            "  {:<18} /{} @ c={}",
-            case.name, case.path, case.concurrency
-        );
-    }
-    std::process::exit(0);
-}
-
 fn usage() -> ! {
     eprintln!(
-        "Usage: harrow-remote-perf-test --server-ssh IP --client-ssh IP --server-private IP --instance-type TYPE --test-case NAME [OPTIONS]\n\
+        "Usage: harrow-remote-perf-test --server-ssh IP --client-ssh IP --server-private IP --instance-type TYPE --config PATH [OPTIONS]\n\
          \n\
          Runs matched Harrow/Axum perf-server comparisons on two EC2 nodes.\n\
          \n\
@@ -286,23 +242,23 @@ fn usage() -> ! {
          \x20 --client-ssh IP        Client public IP (for SSH)\n\
          \x20 --server-private IP    Server private IP (for bench URLs over VPC)\n\
          \x20 --instance-type TYPE   EC2 instance type (e.g. c8g.12xlarge)\n\
-         \x20 --test-case NAME       Named test case (repeatable)\n\
+         \x20 --config PATH          Spinr TOML template (repeatable)\n\
          \n\
          Options:\n\
-         \x20 --list-test-cases      Print supported test cases and exit\n\
+         \x20 --server-flags FLAGS   Extra flags for harrow-perf-server\n\
          \x20 --ssh-user USER        SSH user for both nodes (default: alpine)\n\
          \x20 --port PORT            Server port (default: 3090)\n\
-         \x20 --duration SECS        Test duration per run (default: 60)\n\
-         \x20 --warmup SECS          Warmup duration per run (default: 5)\n\
-         \x20 --results-dir DIR      Override output directory (default: docs/perf/<instance-type>/<timestamp>)\n\
-         \x20 --os-monitors          Collect vmstat/sar/iostat/pidstat artifacts on both nodes\n\
+         \x20 --duration SECS        Test duration (renders into TOML template, default: 60)\n\
+         \x20 --warmup SECS          Warmup duration (renders into TOML template, default: 5)\n\
+         \x20 --results-dir DIR      Override output directory\n\
+         \x20 --os-monitors          Collect vmstat/sar/iostat/pidstat on both nodes\n\
          \x20 --perf                 Collect perf artifacts (default mode: stat)\n\
-         \x20 --perf-mode MODE      Perf mode: stat|record|both (default: stat)\n\
-         \x20 --spinr-mode MODE      Client load generator mode: docker|host (default: docker)\n\
+         \x20 --perf-mode MODE       Perf mode: stat|record|both (default: stat)\n\
+         \x20 --spinr-mode MODE      Client mode: docker|host (default: docker)\n\
          \n\
-         Supported test cases:\n\
-         \x20 {}\n",
-        supported_test_case_names()
+         Session configs (filename starts with 'session-') automatically:\n\
+         \x20 - pass --session to harrow-perf-server\n\
+         \x20 - skip the Axum comparison run\n"
     );
     std::process::exit(1);
 }
@@ -317,9 +273,9 @@ fn parse_args() -> Args {
     let mut port: u16 = DEFAULT_PORT;
     let mut duration: u32 = 60;
     let mut warmup: u32 = 5;
-    let mut results_dir_override: Option<std::path::PathBuf> = None;
-    let mut test_cases = Vec::new();
-    let mut list_test_cases = false;
+    let mut results_dir_override: Option<PathBuf> = None;
+    let mut config_paths: Vec<PathBuf> = Vec::new();
+    let mut server_flags: Option<String> = None;
     let mut os_monitors = false;
     let mut perf_enabled = false;
     let mut perf_mode = PerfMode::Stat;
@@ -344,21 +300,13 @@ fn parse_args() -> Args {
                 instance_type = Some(args[i + 1].clone());
                 i += 2;
             }
-            "--test-case" => {
-                let value = &args[i + 1];
-                if value == "all" {
-                    test_cases.extend(TEST_CASES.iter().copied());
-                } else if let Some(case) = find_test_case(value) {
-                    test_cases.push(case);
-                } else {
-                    eprintln!("invalid --test-case: {value}");
-                    usage();
-                }
+            "--config" => {
+                config_paths.push(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--list-test-cases" => {
-                list_test_cases = true;
-                i += 1;
+            "--server-flags" => {
+                server_flags = Some(args[i + 1].clone());
+                i += 2;
             }
             "--ssh-user" => {
                 ssh_user = args[i + 1].clone();
@@ -377,7 +325,7 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--results-dir" => {
-                results_dir_override = Some(std::path::PathBuf::from(&args[i + 1]));
+                results_dir_override = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
             "--os-monitors" => {
@@ -421,13 +369,17 @@ fn parse_args() -> Args {
         }
     }
 
-    if list_test_cases {
-        print_supported_test_cases_and_exit();
+    if config_paths.is_empty() {
+        eprintln!("error: at least one --config is required");
+        usage();
     }
 
-    if test_cases.is_empty() {
-        eprintln!("error: at least one --test-case is required");
-        usage();
+    // Verify all config files exist upfront.
+    for p in &config_paths {
+        if !p.exists() {
+            eprintln!("error: config file not found: {}", p.display());
+            std::process::exit(1);
+        }
     }
 
     let require = |opt: Option<String>, name: &str| -> String {
@@ -448,7 +400,7 @@ fn parse_args() -> Args {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|_| "unknown".into());
-        std::path::PathBuf::from(format!("docs/perf/{instance_type}/{ts}"))
+        PathBuf::from(format!("docs/perf/{instance_type}/{ts}"))
     });
 
     Args {
@@ -461,13 +413,18 @@ fn parse_args() -> Args {
         duration,
         warmup,
         results_dir,
-        test_cases,
+        config_paths,
+        server_flags,
         os_monitors,
         perf_enabled,
         perf_mode,
         spinr_mode,
     }
 }
+
+// ---------------------------------------------------------------------------
+// SSH helpers
+// ---------------------------------------------------------------------------
 
 fn ssh_run(user: &str, host: &str, remote_cmd: &str) -> std::io::Result<std::process::Output> {
     Command::new("ssh")
@@ -501,10 +458,35 @@ fn ssh_side(
     }
 }
 
-fn start_server_container(args: &Args, framework: Framework) {
+/// SCP a local file to the client node.
+fn scp_to_client(args: &Args, local_path: &Path, remote_path: &str) {
+    let dest = format!("{}@{}:{}", args.ssh_user, args.client_ssh, remote_path);
+    let out = Command::new("scp")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg(local_path)
+        .arg(&dest)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!("    warning: scp to {dest} failed: {}", stderr.trim());
+        }
+        Err(e) => eprintln!("    warning: scp to {dest} failed: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server container management
+// ---------------------------------------------------------------------------
+
+fn start_server_container(args: &Args, framework: Framework, server_flags: &str) {
     let name = framework.container_name();
     let image = framework.image();
-    let command = framework.launch_cmd(args.port);
+    let command = framework.launch_cmd(args.port, server_flags);
     println!(">>> Starting {} on server", framework.as_str());
     let _ = ssh_server(args, &format!("docker rm -f {name} 2>/dev/null || true"));
     let docker_cmd = format!(
@@ -545,13 +527,12 @@ fn wait_for_port(host: &str, port: u16, timeout: Duration) -> Result<(), String>
     Err(format!("server on {addr} did not start within {timeout:?}"))
 }
 
-fn run_key(framework: Framework, test_case: TestCase) -> String {
-    format!(
-        "{}_{}_c{}",
-        framework.as_str(),
-        test_case.key_label,
-        test_case.concurrency
-    )
+// ---------------------------------------------------------------------------
+// Keys and paths
+// ---------------------------------------------------------------------------
+
+fn run_key(framework: Framework, cfg_name: &str) -> String {
+    format!("{}_{}", framework.as_str(), cfg_name)
 }
 
 fn monitor_window_secs(args: &Args) -> u32 {
@@ -566,12 +547,11 @@ fn remote_perf_symfs_dir(key: &str, side: RemoteSide) -> String {
     format!("/tmp/{key}.{}.perf-symfs", side.label())
 }
 
-fn pull_remote_file(
-    args: &Args,
-    side: RemoteSide,
-    remote_path: &str,
-    local_path: &std::path::Path,
-) {
+// ---------------------------------------------------------------------------
+// File transfer and cleanup helpers
+// ---------------------------------------------------------------------------
+
+fn pull_remote_file(args: &Args, side: RemoteSide, remote_path: &str, local_path: &Path) {
     let remote_cmd = format!("test -f {remote_path} && cat {remote_path}");
     match ssh_side(args, side, &remote_cmd) {
         Ok(o) if o.status.success() => {
@@ -643,47 +623,35 @@ fn container_pid(args: &Args, framework: Framework) -> Option<u32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+// ---------------------------------------------------------------------------
+// OS monitors
+// ---------------------------------------------------------------------------
+
 fn start_host_monitors(args: &Args, key: &str, server_pid: Option<u32>) {
     let samples = monitor_window_secs(args);
 
-    for (suffix, cmd) in [
-        (
-            "vmstat.txt",
-            format!(
-                "vmstat 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Server, "vmstat.txt")
-            ),
+    for cmd in [
+        format!(
+            "vmstat 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Server, "vmstat.txt")
         ),
-        (
-            "sar-u.txt",
-            format!(
-                "sar -u 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Server, "sar-u.txt")
-            ),
+        format!(
+            "sar -u 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Server, "sar-u.txt")
         ),
-        (
-            "sar-q.txt",
-            format!(
-                "sar -q 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Server, "sar-q.txt")
-            ),
+        format!(
+            "sar -q 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Server, "sar-q.txt")
         ),
-        (
-            "sar-net.txt",
-            format!(
-                "sar -n DEV,TCP,ETCP 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Server, "sar-net.txt")
-            ),
+        format!(
+            "sar -n DEV,TCP,ETCP 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Server, "sar-net.txt")
         ),
-        (
-            "iostat.txt",
-            format!(
-                "iostat -xz 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Server, "iostat.txt")
-            ),
+        format!(
+            "iostat -xz 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Server, "iostat.txt")
         ),
     ] {
-        let _ = suffix;
         start_remote_capture(args, RemoteSide::Server, &cmd);
     }
 
@@ -695,44 +663,28 @@ fn start_host_monitors(args: &Args, key: &str, server_pid: Option<u32>) {
         start_remote_capture(args, RemoteSide::Server, &cmd);
     }
 
-    for (suffix, cmd) in [
-        (
-            "vmstat.txt",
-            format!(
-                "vmstat 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Client, "vmstat.txt")
-            ),
+    for cmd in [
+        format!(
+            "vmstat 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Client, "vmstat.txt")
         ),
-        (
-            "sar-u.txt",
-            format!(
-                "sar -u 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Client, "sar-u.txt")
-            ),
+        format!(
+            "sar -u 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Client, "sar-u.txt")
         ),
-        (
-            "sar-q.txt",
-            format!(
-                "sar -q 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Client, "sar-q.txt")
-            ),
+        format!(
+            "sar -q 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Client, "sar-q.txt")
         ),
-        (
-            "sar-net.txt",
-            format!(
-                "sar -n DEV,TCP,ETCP 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Client, "sar-net.txt")
-            ),
+        format!(
+            "sar -n DEV,TCP,ETCP 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Client, "sar-net.txt")
         ),
-        (
-            "iostat.txt",
-            format!(
-                "iostat -xz 1 {samples} > {}",
-                remote_artifact_path(key, RemoteSide::Client, "iostat.txt")
-            ),
+        format!(
+            "iostat -xz 1 {samples} > {}",
+            remote_artifact_path(key, RemoteSide::Client, "iostat.txt")
         ),
     ] {
-        let _ = suffix;
         start_remote_capture(args, RemoteSide::Client, &cmd);
     }
 
@@ -745,11 +697,14 @@ fn start_host_monitors(args: &Args, key: &str, server_pid: Option<u32>) {
     }
 }
 
-/// Build a `perf stat` command string.
-///
-/// Two modes:
-/// - **attach**: monitor an existing process (`-p PID -- sleep N`)
-/// - **wrap**: launch a child command (`-- child_cmd`)
+// ---------------------------------------------------------------------------
+// Perf helpers
+// ---------------------------------------------------------------------------
+
+enum PerfTarget {
+    AttachPid { pid: u32, sleep_secs: u32 },
+}
+
 fn perf_stat_cmd(output_path: &str, target: PerfTarget) -> String {
     let target_args = match target {
         PerfTarget::AttachPid { pid, sleep_secs } => {
@@ -774,10 +729,6 @@ fn perf_record_cmd(output_path: &str, target: PerfTarget) -> String {
          if test -f {output_path}; then doas chmod 0644 {output_path} >/dev/null 2>&1 || true; fi; \
          exit $status'"
     )
-}
-
-enum PerfTarget {
-    AttachPid { pid: u32, sleep_secs: u32 },
 }
 
 fn start_server_perf_stat(args: &Args, key: &str, server_pid: u32) {
@@ -977,6 +928,10 @@ fn host_spinr_perf_cmd(args: &Args, key: &str, spinr_cmd: &str) -> String {
     script
 }
 
+// ---------------------------------------------------------------------------
+// Artifact collection
+// ---------------------------------------------------------------------------
+
 fn collect_run_artifacts(args: &Args, framework: Framework, key: &str) {
     if args.os_monitors {
         for suffix in [
@@ -1052,50 +1007,21 @@ fn collect_run_artifacts(args: &Args, framework: Framework, key: &str) {
                     postprocess_remote_perf_record(args, side, key, symfs_dir);
                 }
 
-                let report_remote = remote_artifact_path(key, side, "perf-report.txt");
-                if remote_file_exists(args, side, &report_remote) {
-                    let report_local = args
-                        .results_dir
-                        .join(format!("{key}.{}.perf-report.txt", side.label()));
-                    pull_remote_file(args, side, &report_remote, &report_local);
-                    cleanup_remote_file(args, side, &report_remote);
-                }
-
-                let report_stderr_remote =
-                    remote_artifact_path(key, side, "perf-report.stderr.txt");
-                if remote_file_exists(args, side, &report_stderr_remote) {
-                    let report_stderr_local = args
-                        .results_dir
-                        .join(format!("{key}.{}.perf-report.stderr.txt", side.label()));
-                    pull_remote_file(args, side, &report_stderr_remote, &report_stderr_local);
-                    cleanup_remote_file(args, side, &report_stderr_remote);
-                }
-
-                let script_remote = remote_artifact_path(key, side, "perf.script");
-                if remote_file_exists(args, side, &script_remote) {
-                    let script_local = args
-                        .results_dir
-                        .join(format!("{key}.{}.perf.script", side.label()));
-                    pull_remote_file(args, side, &script_remote, &script_local);
-                    cleanup_remote_file(args, side, &script_remote);
-                }
-
-                let folded_remote = remote_artifact_path(key, side, "perf.folded");
-                if remote_file_exists(args, side, &folded_remote) {
-                    let folded_local = args
-                        .results_dir
-                        .join(format!("{key}.{}.perf.folded", side.label()));
-                    pull_remote_file(args, side, &folded_remote, &folded_local);
-                    cleanup_remote_file(args, side, &folded_remote);
-                }
-
-                let svg_remote = remote_artifact_path(key, side, "perf.svg");
-                if remote_file_exists(args, side, &svg_remote) {
-                    let svg_local = args
-                        .results_dir
-                        .join(format!("{key}.{}.perf.svg", side.label()));
-                    pull_remote_file(args, side, &svg_remote, &svg_local);
-                    cleanup_remote_file(args, side, &svg_remote);
+                for suffix in [
+                    "perf-report.txt",
+                    "perf-report.stderr.txt",
+                    "perf.script",
+                    "perf.folded",
+                    "perf.svg",
+                ] {
+                    let remote = remote_artifact_path(key, side, suffix);
+                    if remote_file_exists(args, side, &remote) {
+                        let local =
+                            args.results_dir
+                                .join(format!("{key}.{}.{}", side.label(), suffix));
+                        pull_remote_file(args, side, &remote, &local);
+                        cleanup_remote_file(args, side, &remote);
+                    }
                 }
 
                 if let Some(symfs_dir) = symfs_dir.as_deref() {
@@ -1110,16 +1036,14 @@ fn write_run_meta(
     args: &Args,
     key: &str,
     framework: Framework,
-    test_case: TestCase,
+    cfg_name: &str,
     started_at_utc: &str,
     completed_at_utc: &str,
 ) {
     let meta = serde_json::json!({
         "key": key,
         "framework": framework.as_str(),
-        "test_case": test_case.name,
-        "path": format!("/{}", test_case.path),
-        "concurrency": test_case.concurrency,
+        "config": cfg_name,
         "warmup_secs": args.warmup,
         "duration_secs": args.duration,
         "server_host": args.server_ssh,
@@ -1130,16 +1054,6 @@ fn write_run_meta(
         "perf_mode": args.perf_mode.as_str(),
         "perf_stat": perf_stat_enabled(args),
         "perf_record": perf_record_enabled(args),
-        "server_perf_record_remote_path": remote_artifact_path(key, RemoteSide::Server, "perf.data"),
-        "client_perf_record_remote_path": if client_perf_enabled(args) {
-            Some(remote_artifact_path(key, RemoteSide::Client, "perf.data"))
-        } else {
-            None
-        },
-        "server_perf_stat": perf_stat_enabled(args),
-        "server_perf_record": perf_record_enabled(args),
-        "client_perf_stat": perf_stat_enabled(args) && client_perf_enabled(args),
-        "client_perf_record": perf_record_enabled(args) && client_perf_enabled(args),
         "perf_scope": perf_scope_label(args),
         "started_at_utc": started_at_utc,
         "completed_at_utc": completed_at_utc,
@@ -1148,23 +1062,17 @@ fn write_run_meta(
     let _ = fs::write(path, serde_json::to_vec_pretty(&meta).unwrap());
 }
 
-fn run_bench(
-    args: &Args,
-    key: &str,
-    url: &str,
-    concurrency: u32,
-    outfile: &std::path::Path,
-) -> Option<Value> {
-    let spinr_cmd = format!(
-        "{DEFAULT_SPINR_BIN} load-test --max-throughput -c {concurrency} -d {} -w {} -j {url}",
-        args.duration, args.warmup
-    );
+// ---------------------------------------------------------------------------
+// Bench runner
+// ---------------------------------------------------------------------------
+
+fn run_bench(args: &Args, key: &str, remote_config_path: &str, outfile: &Path) -> Option<Value> {
+    let spinr_cmd = format!("{DEFAULT_SPINR_BIN} bench {remote_config_path} -j");
 
     let remote_cmd = match args.spinr_mode {
         SpinrMode::Docker => format!(
-            "docker run --rm --network host --ulimit nofile=65535:65535 spinr load-test \
-             --max-throughput -c {concurrency} -d {} -w {} -j {url}",
-            args.duration, args.warmup
+            "docker run --rm --network host --ulimit nofile=65535:65535 \
+             -v {remote_config_path}:/bench.toml spinr bench /bench.toml -j"
         ),
         SpinrMode::Host if client_perf_enabled(args) => host_spinr_perf_cmd(args, key, &spinr_cmd),
         SpinrMode::Host => spinr_cmd.clone(),
@@ -1176,7 +1084,7 @@ fn run_bench(
             let val: Option<Value> = serde_json::from_slice(&o.stdout).ok();
             if let Some(ref v) = val {
                 println!(
-                    "    → rps={} p99={}ms",
+                    "    -> rps={} p99={}ms",
                     val_str(v, "rps"),
                     val_str(v, "latency_p99_ms")
                 );
@@ -1212,33 +1120,53 @@ fn collect_docker_logs(args: &Args, framework: Framework, key: &str) {
     }
 }
 
-fn run_test_case(
+// ---------------------------------------------------------------------------
+// Per-config run
+// ---------------------------------------------------------------------------
+
+fn run_config(
     args: &Args,
+    config_path: &Path,
     framework: Framework,
-    test_case: TestCase,
     results: &mut BTreeMap<String, Value>,
 ) {
-    let key = run_key(framework, test_case);
-    let url = format!(
-        "http://{}:{}/{}",
-        args.server_private, args.port, test_case.path
-    );
-    let outfile = args.results_dir.join(format!("{key}.json"));
+    let cfg_name = config_name(config_path);
+    let key = run_key(framework, &cfg_name);
+    let is_session = is_session_config(config_path);
+
+    // Server flags: explicit --server-flags, or auto --session for session configs.
+    let server_flags = if let Some(ref flags) = args.server_flags {
+        flags.clone()
+    } else if is_session && framework == Framework::Harrow {
+        "--session".to_string()
+    } else {
+        String::new()
+    };
 
     println!();
-    println!(
-        "--- {} /{} c={} ---",
-        framework.as_str(),
-        test_case.path,
-        test_case.concurrency
-    );
-    start_server_container(args, framework);
+    println!("--- {} / {} ---", framework.as_str(), cfg_name);
+
+    // 1. Start server.
+    start_server_container(args, framework, &server_flags);
     if let Err(e) = wait_for_port(&args.server_ssh, args.port, Duration::from_secs(30)) {
         eprintln!("  {e}");
         stop_server_container(args, framework);
         std::process::exit(1);
     }
 
+    // 2. Render template and SCP to client.
+    let raw = fs::read_to_string(config_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", config_path.display()));
+    let server_addr = format!("{}:{}", args.server_private, args.port);
+    let rendered = render_template(&raw, &server_addr, args.duration, args.warmup);
+
+    let local_tmp = std::env::temp_dir().join(format!("{cfg_name}.toml"));
+    fs::write(&local_tmp, &rendered).expect("failed to write temp TOML");
+    let remote_config = format!("/tmp/{cfg_name}.toml");
+    scp_to_client(args, &local_tmp, &remote_config);
+    let _ = fs::remove_file(&local_tmp);
+
+    // 3. Start perf/monitors.
     let server_pid = container_pid(args, framework);
     if args.os_monitors {
         start_host_monitors(args, &key, server_pid);
@@ -1259,9 +1187,11 @@ fn run_test_case(
         }
     }
 
-    println!("  [{key}] → {url}");
+    // 4. Run spinr bench.
+    let outfile = args.results_dir.join(format!("{key}.json"));
+    println!("  [{key}] -> spinr bench {remote_config}");
     let started_at_utc = chrono_lite_utc();
-    if let Some(v) = run_bench(args, &key, &url, test_case.concurrency, &outfile) {
+    if let Some(v) = run_bench(args, &key, &remote_config, &outfile) {
         results.insert(key.clone(), v);
     }
     let completed_at_utc = chrono_lite_utc();
@@ -1270,19 +1200,25 @@ fn run_test_case(
         thread::sleep(Duration::from_secs(MONITOR_MARGIN_SECS as u64));
     }
 
+    // 5. Collect artifacts and stop.
     collect_run_artifacts(args, framework, &key);
     write_run_meta(
         args,
         &key,
         framework,
-        test_case,
+        &cfg_name,
         &started_at_utc,
         &completed_at_utc,
     );
     collect_docker_stats(args, &key);
     collect_docker_logs(args, framework, &key);
     stop_server_container(args, framework);
+    cleanup_remote_file(args, RemoteSide::Client, &remote_config);
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn val_str(v: &Value, key: &str) -> String {
     match v.get(key) {
@@ -1317,6 +1253,10 @@ fn chrono_lite_utc() -> String {
         Err(_) => "unknown".into(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Preflight
+// ---------------------------------------------------------------------------
 
 fn preflight_checks(args: &Args) {
     println!("--- Preflight checks ---");
@@ -1520,11 +1460,17 @@ fn preflight_checks(args: &Args) {
     println!();
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 fn main() {
     let args = parse_args();
     fs::create_dir_all(&args.results_dir).unwrap();
 
     preflight_checks(&args);
+
+    let config_names: Vec<String> = args.config_paths.iter().map(|p| config_name(p)).collect();
 
     println!("============================================");
     println!(" Matched Harrow/Axum Performance Test");
@@ -1538,26 +1484,33 @@ fn main() {
     println!(" Spinr mode: {}", args.spinr_mode.as_str());
     println!(" OS monitors: {}", args.os_monitors);
     println!(" Perf: {}", perf_scope_label(&args));
-    println!(
-        " Test cases: {}",
-        args.test_cases
-            .iter()
-            .map(|case| case.name)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    println!(" Configs: {}", config_names.join(", "));
     println!(" Results: {}/", args.results_dir.display());
     println!("============================================");
     println!();
 
     let mut results: BTreeMap<String, Value> = BTreeMap::new();
 
-    for test_case in &args.test_cases {
-        println!("========== TEST CASE: {} ==========", test_case.name);
-        run_test_case(&args, Framework::Harrow, *test_case, &mut results);
-        thread::sleep(SLEEP_BETWEEN_RUNS);
-        run_test_case(&args, Framework::Axum, *test_case, &mut results);
-        thread::sleep(SLEEP_BETWEEN_RUNS);
+    for config_path in &args.config_paths {
+        let cfg_name = config_name(config_path);
+        let is_session = is_session_config(config_path);
+
+        println!(
+            "========== CONFIG: {}{} ==========",
+            cfg_name,
+            if is_session { " (session)" } else { "" }
+        );
+
+        let frameworks: Vec<Framework> = if is_session {
+            vec![Framework::Harrow]
+        } else {
+            vec![Framework::Harrow, Framework::Axum]
+        };
+
+        for framework in &frameworks {
+            run_config(&args, config_path, *framework, &mut results);
+            thread::sleep(SLEEP_BETWEEN_RUNS);
+        }
     }
 
     println!();

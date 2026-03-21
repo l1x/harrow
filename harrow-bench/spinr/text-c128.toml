@@ -1,0 +1,7 @@
+[[scenario]]
+name = "text-c128"
+url = "http://{{ server }}/text"
+connections = 128
+max_throughput = true
+duration = {{ duration }}
+warmup = {{ warmup }}
