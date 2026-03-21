@@ -12,16 +12,20 @@ use serde_json::Value;
 struct RunMeta {
     client_host: String,
     completed_at_utc: String,
+    #[serde(default)]
     concurrency: u32,
     duration_secs: u32,
     framework: String,
     key: String,
     os_monitors: bool,
+    #[serde(default)]
     path: String,
     perf_scope: String,
     server_host: String,
     spinr_mode: String,
     started_at_utc: String,
+    /// Accepts either "test_case" or "config" from the JSON.
+    #[serde(alias = "config")]
     test_case: String,
     warmup_secs: u32,
 }
@@ -220,17 +224,22 @@ fn load_meta(path: &Path) -> io::Result<RunMeta> {
 fn load_metrics(path: PathBuf) -> io::Result<BenchMetrics> {
     let bytes = fs::read(path)?;
     let value: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    // spinr bench JSON nests metrics under scenarios[0].metrics; fall back to top-level for
+    // backwards compatibility with older result files.
+    let m = value
+        .pointer("/scenarios/0/metrics")
+        .unwrap_or(&value);
     Ok(BenchMetrics {
-        rps: value.get("rps").and_then(Value::as_f64).unwrap_or_default(),
-        p50: value
+        rps: m.get("rps").and_then(Value::as_f64).unwrap_or_default(),
+        p50: m
             .get("latency_p50_ms")
             .and_then(Value::as_f64)
             .unwrap_or_default(),
-        p99: value
+        p99: m
             .get("latency_p99_ms")
             .and_then(Value::as_f64)
             .unwrap_or_default(),
-        p999: value
+        p999: m
             .get("latency_p999_ms")
             .and_then(Value::as_f64)
             .unwrap_or_default(),

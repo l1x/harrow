@@ -1043,7 +1043,9 @@ fn write_run_meta(
     let meta = serde_json::json!({
         "key": key,
         "framework": framework.as_str(),
-        "config": cfg_name,
+        "test_case": cfg_name,
+        "path": format!("harrow-bench/spinr/{cfg_name}.toml"),
+        "concurrency": 0,
         "warmup_secs": args.warmup,
         "duration_secs": args.duration,
         "server_host": args.server_ssh,
@@ -1083,10 +1085,14 @@ fn run_bench(args: &Args, key: &str, remote_config_path: &str, outfile: &Path) -
             let _ = fs::write(outfile, &o.stdout);
             let val: Option<Value> = serde_json::from_slice(&o.stdout).ok();
             if let Some(ref v) = val {
+                // spinr bench JSON nests metrics under scenarios[0].metrics
+                let metrics = v
+                    .pointer("/scenarios/0/metrics")
+                    .unwrap_or(v);
                 println!(
                     "    -> rps={} p99={}ms",
-                    val_str(v, "rps"),
-                    val_str(v, "latency_p99_ms")
+                    val_str(metrics, "rps"),
+                    val_str(metrics, "latency_p99_ms")
                 );
             }
             val
