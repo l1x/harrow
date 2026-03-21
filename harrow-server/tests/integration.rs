@@ -18,6 +18,12 @@ use harrow_middleware::timeout::timeout_middleware;
 use harrow_o11y::O11yConfig;
 use http::StatusCode;
 
+// HTTP/2 h2c imports
+use bytes::Bytes;
+use http_body_util::{BodyExt, Empty};
+use hyper::client::conn::http2 as h2_client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+
 /// Shared counter used as application state.
 struct HitCounter(AtomicUsize);
 
@@ -1079,4 +1085,265 @@ async fn client_session_tampered_cookie_rejected() {
     assert_eq!(resp.text(), "");
     // No set-cookie since session wasn't modified
     assert!(resp.header("set-cookie").is_none());
+}
+
+// ============================================================================
+// HTTP/2 h2c Tests (cleartext HTTP/2 over TCP)
+// ============================================================================
+
+/// Helper: perform an HTTP/2 cleartext (h2c) request against a harrow server.
+/// Returns (status, body_string).
+async fn h2c_get(addr: SocketAddr, path: &str) -> (u16, String) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = h2_client::handshake(TokioExecutor::new(), io)
+        .await
+        .unwrap();
+
+    // Drive the connection in the background.
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("h2c connection error: {e}");
+        }
+    });
+
+    let req = http::Request::get(path)
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+
+    let status = resp.status().as_u16();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body).to_string();
+
+    (status, body_str)
+}
+
+/// Helper: perform an HTTP/2 cleartext POST with a body.
+async fn h2c_post(addr: SocketAddr, path: &str, body: &[u8]) -> (u16, String) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = h2_client::handshake(TokioExecutor::new(), io)
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("h2c connection error: {e}");
+        }
+    });
+
+    let req = http::Request::post(path)
+        .body(http_body_util::Full::new(Bytes::copy_from_slice(body)))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+
+    let status = resp.status().as_u16();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).to_string())
+}
+
+/// Helper: perform an HTTP/2 cleartext GET with extra headers.
+async fn h2c_get_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, String) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = h2_client::handshake(TokioExecutor::new(), io)
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("h2c connection error: {e}");
+        }
+    });
+
+    let mut builder = http::Request::get(path);
+    for (k, v) in headers {
+        builder = builder.header(*k, *v);
+    }
+    let req = builder.body(Empty::<Bytes>::new()).unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+
+    let status = resp.status().as_u16();
+    let resp_headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, resp_headers, String::from_utf8_lossy(&body).to_string())
+}
+
+#[tokio::test]
+async fn h2c_basic_get() {
+    let app = App::new().get("/hello", hello);
+    let addr = start_server(app).await;
+
+    let (status, body) = h2c_get(addr, "/hello").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello");
+}
+
+#[tokio::test]
+async fn h2c_path_params() {
+    let app = App::new().get("/greet/:name", greet);
+    let addr = start_server(app).await;
+
+    let (status, body) = h2c_get(addr, "/greet/world").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello, world");
+}
+
+#[tokio::test]
+async fn h2c_404_on_unknown_path() {
+    let app = App::new().get("/hello", hello);
+    let addr = start_server(app).await;
+
+    let (status, _) = h2c_get(addr, "/nope").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn h2c_405_on_wrong_method() {
+    let app = App::new().post("/submit", hello);
+    let addr = start_server(app).await;
+
+    let (status, _) = h2c_get(addr, "/submit").await;
+    assert_eq!(status, 405);
+}
+
+#[tokio::test]
+async fn h2c_post_with_body() {
+    let app = App::new().post("/upload", echo_body);
+    let addr = start_server(app).await;
+
+    let (status, body) = h2c_post(addr, "/upload", b"hello h2").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "got 8 bytes");
+}
+
+#[tokio::test]
+async fn h2c_middleware_runs() {
+    let app = App::new()
+        .middleware(wrap_middleware)
+        .middleware(second_middleware)
+        .get("/hello", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, body) = h2c_get_with_headers(addr, "/hello", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello");
+    assert!(
+        headers.iter().any(|(k, v)| k == "x-wrap" && v == "true"),
+        "expected x-wrap header over h2c"
+    );
+    assert!(
+        headers.iter().any(|(k, v)| k == "x-second" && v == "yes"),
+        "expected x-second header over h2c"
+    );
+}
+
+#[tokio::test]
+async fn h2c_multiplexed_requests() {
+    let app = App::new()
+        .get("/hello", hello)
+        .get("/greet/:name", greet);
+    let addr = start_server(app).await;
+
+    // Open a single h2c connection and send multiple concurrent requests.
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = h2_client::handshake(TokioExecutor::new(), io)
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("h2c connection error: {e}");
+        }
+    });
+
+    // Fire off multiple requests concurrently on the same connection.
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let req = http::Request::get(format!("/greet/user{i}"))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let fut = sender.send_request(req);
+        handles.push(tokio::spawn(async move {
+            let resp = fut.await.unwrap();
+            let status = resp.status().as_u16();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            (i, status, String::from_utf8_lossy(&body).to_string())
+        }));
+    }
+
+    for handle in handles {
+        let (i, status, body) = handle.await.unwrap();
+        assert_eq!(status, 200, "request {i} failed");
+        assert_eq!(body, format!("hello, user{i}"), "request {i} wrong body");
+    }
+}
+
+#[tokio::test]
+async fn h2c_state_works() {
+    let counter = Arc::new(HitCounter(AtomicUsize::new(0)));
+    let app = App::new().state(counter.clone()).get("/count", state_handler);
+    let addr = start_server(app).await;
+
+    let (status, body) = h2c_get(addr, "/count").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hits: 1");
+
+    let (status, body) = h2c_get(addr, "/count").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "hits: 2");
+}
+
+#[tokio::test]
+async fn h2c_body_limit_rejects_oversized() {
+    let app = App::new()
+        .middleware(body_limit_middleware(50))
+        .post("/upload", echo_body);
+    let addr = start_server(app).await;
+
+    let body = vec![b'x'; 200];
+    let (status, _) = h2c_post(addr, "/upload", &body).await;
+    assert_eq!(status, 413);
+}
+
+#[tokio::test]
+async fn h2c_session_round_trip() {
+    let config = SessionConfig::new(test_secret()).secure(false);
+    let app = App::new()
+        .middleware(session_middleware(InMemorySessionStore::new(), config))
+        .get("/set", session_set_handler)
+        .get("/get", session_get_handler);
+    let addr = start_server(app).await;
+
+    // Set session data
+    let (status, headers, _) = h2c_get_with_headers(addr, "/set", &[]).await;
+    assert_eq!(status, 200);
+    let set_cookie = headers
+        .iter()
+        .find(|(k, _)| k == "set-cookie")
+        .map(|(_, v)| v.as_str())
+        .expect("expected set-cookie on h2c session set");
+    assert!(set_cookie.contains("sid="));
+
+    // Extract cookie value
+    let cookie_val = set_cookie.split(';').next().unwrap().trim();
+
+    // Read session data with cookie
+    let (status, _, body) = h2c_get_with_headers(addr, "/get", &[("cookie", cookie_val)]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "alice");
 }

@@ -6,8 +6,7 @@ license.workspace = true
 description = "Hyper server binding for Harrow: connection handling, graceful shutdown"
 
 [features]
-default = ["http2"]
-http2 = []
+default = []
 tls = ["hyper-rustls", "rustls"]
 profiling = []
 
@@ -30,6 +29,9 @@ rustls = { version = "0.23", optional = true }
 harrow-core = { workspace = true }
 harrow-middleware = { workspace = true, features = ["timeout", "o11y", "body-limit", "rate-limit", "session"] }
 harrow-o11y = { workspace = true }
+bytes = { workspace = true }
+http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client"] }
+hyper-util = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
