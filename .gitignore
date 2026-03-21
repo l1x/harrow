@@ -6,6 +6,7 @@ flamegraphs/manifest.json
 *.perf.data.old
 *.perf.script
 *.perf-report.txt
+*.pidstat.txt
 perf.data
 perf.data.old
 infra/**/.terraform/
