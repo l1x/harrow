@@ -14,7 +14,7 @@ use harrow_bench::{
 const STACK_ACCEPT_ENCODING: &str = "gzip";
 const STACK_ORIGIN: &str = "https://bench.example.com";
 
-fn stack_headers<'a>(cookie: &'a str) -> [(&'static str, &'a str); 3] {
+fn stack_headers(cookie: &str) -> [(&'static str, &str); 3] {
     [
         ("cookie", cookie),
         ("accept-encoding", STACK_ACCEPT_ENCODING),

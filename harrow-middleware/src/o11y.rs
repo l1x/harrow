@@ -360,14 +360,13 @@ mod tests {
             if let rolly::metrics::MetricSnapshot::Counter {
                 name, data_points, ..
             } = snap
+                && name == counter_name
             {
-                if name == counter_name {
-                    return data_points.iter().find(|(dp_attrs, _, _)| {
-                        attrs
-                            .iter()
-                            .all(|(k, v)| dp_attrs.iter().any(|(dk, dv)| dk == k && dv == v))
-                    });
-                }
+                return data_points.iter().find(|(dp_attrs, _, _)| {
+                    attrs
+                        .iter()
+                        .all(|(k, v)| dp_attrs.iter().any(|(dk, dv)| dk == k && dv == v))
+                });
             }
         }
         None
@@ -383,14 +382,13 @@ mod tests {
             if let rolly::metrics::MetricSnapshot::Histogram {
                 name, data_points, ..
             } = snap
+                && name == hist_name
             {
-                if name == hist_name {
-                    return data_points.iter().find(|dp| {
-                        attrs
-                            .iter()
-                            .all(|(k, v)| dp.attrs.iter().any(|(dk, dv)| dk == k && dv == v))
-                    });
-                }
+                return data_points.iter().find(|dp| {
+                    attrs
+                        .iter()
+                        .all(|(k, v)| dp.attrs.iter().any(|(dk, dv)| dk == k && dv == v))
+                });
             }
         }
         None
