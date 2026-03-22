@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -51,15 +51,53 @@ async fn handle_connection_inner(
     header_read_timeout: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = BytesMut::with_capacity(8192);
+    let max_body = shared.max_body_size;
 
     loop {
         // --- Read headers ---
-        let parsed = read_headers(&mut stream, &mut buf, header_read_timeout).await?;
+        let parsed = match read_headers(&mut stream, &mut buf, header_read_timeout).await {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // Send 400 Bad Request for parse errors (not clean disconnects).
+                let msg = e.to_string();
+                if msg != "connection closed" {
+                    let _ = write_400(&mut stream).await;
+                }
+                return Err(e);
+            }
+        };
         let keep_alive = parsed.keep_alive;
 
+        // --- Early reject: Content-Length exceeds body limit ---
+        if max_body > 0
+            && let Some(cl) = parsed.content_length
+            && cl as usize > max_body
+        {
+            // Don't bother reading the body — reject immediately.
+            // We can't reuse the connection reliably after skipping body bytes.
+            let response = harrow_core::response::Response::new(
+                http::StatusCode::PAYLOAD_TOO_LARGE,
+                "payload too large",
+            );
+            write_response(&mut stream, response.into_inner(), false).await?;
+            break;
+        }
+
+        // --- Send 100 Continue if requested ---
+        if parsed.expect_continue {
+            let (result, _) = stream.write_all(codec::CONTINUE_100.to_vec()).await;
+            result?;
+        }
+
         // --- Read body (if any) into a Bytes ---
-        let body_bytes =
-            read_body(&mut stream, &mut buf, parsed.content_length, parsed.chunked).await?;
+        let body_bytes = read_body(
+            &mut stream,
+            &mut buf,
+            parsed.content_length,
+            parsed.chunked,
+            max_body,
+        )
+        .await?;
 
         // --- Build http::Request<Body> ---
         let mut builder = http::Request::builder()
@@ -81,7 +119,7 @@ async fn handle_connection_inner(
         let response = dispatch(Arc::clone(&shared), req).await;
 
         // --- Write response ---
-        write_response(&mut stream, response).await?;
+        write_response(&mut stream, response, keep_alive).await?;
 
         if !keep_alive {
             break;
@@ -93,12 +131,15 @@ async fn handle_connection_inner(
 
 /// Read HTTP headers from the stream into `buf`.
 ///
-/// Returns the parsed request once a complete header block is found.
+/// Uses a wall-clock deadline for the entire header read phase to prevent
+/// Slowloris attacks (trickling bytes to keep per-read timeouts from firing).
 async fn read_headers(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
     timeout: Option<Duration>,
 ) -> Result<codec::ParsedRequest, Box<dyn std::error::Error>> {
+    let deadline = timeout.map(|dur| Instant::now() + dur);
+
     loop {
         // Try parsing what we have.
         match codec::try_parse_request(buf) {
@@ -119,12 +160,21 @@ async fn read_headers(
             return Err("request headers too large".into());
         }
 
+        // Check wall-clock deadline before each read.
+        let remaining = match deadline {
+            Some(dl) => match dl.checked_duration_since(Instant::now()) {
+                Some(rem) => Some(rem),
+                None => return Err("header read timeout".into()),
+            },
+            None => None,
+        };
+
         // Read more data from socket.
         let read_buf = vec![0u8; 4096];
-        let (result, read_buf) = if let Some(dur) = timeout {
+        let (result, read_buf) = if let Some(rem) = remaining {
             monoio::select! {
                 r = stream.read(read_buf) => r,
-                _ = monoio::time::sleep(dur) => {
+                _ = monoio::time::sleep(rem) => {
                     return Err("header read timeout".into());
                 }
             }
@@ -147,14 +197,16 @@ async fn read_headers(
 /// Read the request body based on Content-Length or chunked encoding.
 ///
 /// `buf` may already contain body data left over from header parsing.
+/// `max_body` caps the total bytes read (0 = unlimited).
 async fn read_body(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
     content_length: Option<u64>,
     chunked: bool,
+    max_body: usize,
 ) -> Result<Bytes, Box<dyn std::error::Error>> {
     if chunked {
-        return read_chunked_body(stream, buf).await;
+        return read_chunked_body(stream, buf, max_body).await;
     }
 
     let length = match content_length {
@@ -179,13 +231,19 @@ async fn read_body(
 }
 
 /// Read a chunked transfer-encoded body.
+///
+/// `max_body` caps the decoded body size (0 = unlimited).
 async fn read_chunked_body(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
+    max_body: usize,
 ) -> Result<Bytes, Box<dyn std::error::Error>> {
     loop {
         match codec::decode_chunked(buf)? {
             Some((body, consumed)) => {
+                if max_body > 0 && body.len() > max_body {
+                    return Err("body too large".into());
+                }
                 let _ = buf.split_to(consumed);
                 return Ok(body);
             }
@@ -203,12 +261,31 @@ async fn read_chunked_body(
     }
 }
 
+/// Write a minimal 400 Bad Request response.
+async fn write_400(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    let response =
+        b"HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\nconnection: close\r\n\r\nbad request"
+            .to_vec();
+    let (result, _) = stream.write_all(response).await;
+    result?;
+    Ok(())
+}
+
 /// Write the full HTTP response (head + body) to the stream.
+///
+/// When `keep_alive` is false, adds `Connection: close` to the response (RFC 9112 §9.6).
 async fn write_response(
     stream: &mut TcpStream,
     response: http::Response<harrow_core::response::ResponseBody>,
+    keep_alive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+
+    if !keep_alive {
+        parts
+            .headers
+            .insert(http::header::CONNECTION, "close".parse().unwrap());
+    }
 
     let has_content_length = parts.headers.contains_key(http::header::CONTENT_LENGTH);
 

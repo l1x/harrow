@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, TRANSFER_ENCODING};
 use http::{HeaderMap, Method, Uri, Version};
 
 /// Maximum number of headers we parse per request.
@@ -19,6 +19,8 @@ pub(crate) struct ParsedRequest {
     pub chunked: bool,
     /// Whether to keep the connection alive after this request.
     pub keep_alive: bool,
+    /// Whether the client sent `Expect: 100-continue`.
+    pub expect_continue: bool,
 }
 
 /// Errors from the codec layer.
@@ -79,6 +81,7 @@ pub(crate) fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError>
     let mut chunked = false;
     let mut conn_close = false;
     let mut conn_keep_alive = false;
+    let mut expect_continue = false;
 
     for h in parsed.headers.iter() {
         let name = http::header::HeaderName::from_bytes(h.name.as_bytes())
@@ -108,6 +111,11 @@ pub(crate) fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError>
             if lower.contains("keep-alive") {
                 conn_keep_alive = true;
             }
+        } else if name == EXPECT
+            && let Ok(s) = std::str::from_utf8(h.value)
+            && s.trim().eq_ignore_ascii_case("100-continue")
+        {
+            expect_continue = true;
         }
 
         headers.append(name, value);
@@ -124,6 +132,7 @@ pub(crate) fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError>
         content_length,
         chunked,
         keep_alive,
+        expect_continue,
     })
 }
 
@@ -188,6 +197,9 @@ pub(crate) fn encode_chunk(data: &[u8]) -> Vec<u8> {
 
 /// Chunked transfer-encoding terminator.
 pub(crate) const CHUNK_TERMINATOR: &[u8] = b"0\r\n\r\n";
+
+/// HTTP/1.1 100 Continue interim response.
+pub(crate) const CONTINUE_100: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 /// Decode chunked transfer-encoding body from a buffer.
 ///

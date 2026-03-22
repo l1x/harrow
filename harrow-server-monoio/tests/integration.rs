@@ -336,10 +336,12 @@ async fn malformed_request() {
         .await
         .unwrap();
 
-    // Server should close the connection.
+    // Server should send 400 Bad Request and close.
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
-    // No valid HTTP response expected — connection just closes.
+    let (status, _headers, body) = parse_http_response(&buf);
+    assert_eq!(status, 400);
+    assert_eq!(body, "bad request");
 }
 
 #[tokio::test]

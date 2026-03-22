@@ -106,6 +106,11 @@ pub async fn serve_with_config(
                     }
                 };
 
+                // Disable Nagle's algorithm for lower latency.
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::warn!("failed to set TCP_NODELAY: {e}");
+                }
+
                 if active_count.get() >= config.max_connections {
                     drop(stream);
                     tracing::warn!("connection limit reached, dropping new connection");
