@@ -1497,3 +1497,67 @@ async fn h2c_session_round_trip() {
     assert_eq!(status, 200);
     assert_eq!(body, "alice");
 }
+
+// ---------------------------------------------------------------------------
+// Global middleware runs on 404/405 (dispatch refactor)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tcp_middleware_runs_on_404() {
+    let app = App::new().middleware(wrap_middleware).get("/exists", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, _body) = http_get(addr, "/nope").await;
+    assert_eq!(status, 404);
+    let x_wrap = headers.iter().find(|(k, _)| k == "x-wrap");
+    assert_eq!(
+        x_wrap.map(|(_, v)| v.as_str()),
+        Some("true"),
+        "global middleware should run on 404 over TCP"
+    );
+}
+
+#[tokio::test]
+async fn tcp_middleware_runs_on_405() {
+    let app = App::new().middleware(wrap_middleware).get("/users", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, _body) = http_request(addr, "POST", "/users").await;
+    assert_eq!(status, 405);
+    let x_wrap = headers.iter().find(|(k, _)| k == "x-wrap");
+    assert_eq!(
+        x_wrap.map(|(_, v)| v.as_str()),
+        Some("true"),
+        "global middleware should run on 405 over TCP"
+    );
+    let allow = headers.iter().find(|(k, _)| k == "allow");
+    assert!(allow.is_some(), "405 should include Allow header over TCP");
+}
+
+#[tokio::test]
+async fn tcp_o11y_middleware_runs_on_404() {
+    let app = App::new().middleware(o11y_middleware).get("/exists", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, _body) = http_get(addr, "/nope").await;
+    assert_eq!(status, 404);
+    let rid = headers.iter().find(|(k, _)| k == "x-request-id");
+    assert!(
+        rid.is_some(),
+        "o11y middleware should add request-id header on 404 over TCP"
+    );
+}
+
+#[tokio::test]
+async fn tcp_o11y_middleware_runs_on_405() {
+    let app = App::new().middleware(o11y_middleware).get("/users", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, _body) = http_request(addr, "DELETE", "/users").await;
+    assert_eq!(status, 405);
+    let rid = headers.iter().find(|(k, _)| k == "x-request-id");
+    assert!(
+        rid.is_some(),
+        "o11y middleware should add request-id header on 405 over TCP"
+    );
+}

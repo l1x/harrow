@@ -164,6 +164,12 @@ impl Request {
         self.route_pattern.as_deref()
     }
 
+    /// Cheap `Arc<str>` clone of the route pattern. Used by o11y middleware
+    /// to hold the route label across `next.run(req)`.
+    pub fn route_pattern_arc(&self) -> Option<Arc<str>> {
+        self.route_pattern.clone()
+    }
+
     /// The request ID assigned by the o11y middleware.
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()

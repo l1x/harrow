@@ -95,6 +95,20 @@ pub struct RouteMetadata {
     pub custom: HashMap<String, String>,
 }
 
+/// A minimal serializable route snapshot for export and reporting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "json", derive(serde::Serialize))]
+pub struct RouteSummary {
+    pub method: String,
+    pub pattern: String,
+}
+
+impl std::fmt::Display for RouteSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.method, self.pattern)
+    }
+}
+
 /// A single route entry. Concrete struct, not a trait object graph.
 pub struct Route {
     pub method: Method,
@@ -150,6 +164,20 @@ impl RouteTable {
         self.routes.iter()
     }
 
+    /// Return a lightweight snapshot of the registered routes.
+    ///
+    /// This is intended for simple exports like `GET /users/:id` without
+    /// exposing handler or middleware internals.
+    pub fn summary(&self) -> Vec<RouteSummary> {
+        self.routes
+            .iter()
+            .map(|route| RouteSummary {
+                method: route.method.as_str().to_string(),
+                pattern: route.pattern.as_str().to_string(),
+            })
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.routes.len()
     }
@@ -186,6 +214,15 @@ impl RouteTable {
             .at(path)
             .ok()
             .is_some_and(|m| self.method_maps[*m.value].has_any())
+    }
+
+    /// Return the route pattern for a path match, regardless of HTTP method.
+    /// Used for metric labels on 405 responses (avoids raw-path cardinality explosion).
+    pub fn route_pattern_for_path(&self, path: &str) -> Option<Arc<str>> {
+        let matched = self.router.at(path).ok()?;
+        let map_idx = *matched.value;
+        let (_, route_idx) = self.method_maps[map_idx].entries.first()?;
+        Some(self.routes[*route_idx].pattern.as_arc_str())
     }
 
     /// Return the HTTP methods registered for the given path.
@@ -780,6 +817,39 @@ mod tests {
         assert!(table.get(0).is_some());
         assert!(table.get(2).is_none());
         assert_eq!(table.iter().count(), 2);
+    }
+
+    #[test]
+    fn route_table_summary_returns_method_and_pattern_only() {
+        let mut table = RouteTable::new();
+        table.push(make_route(Method::GET, "/health"));
+        table.push(make_route(Method::POST, "/users"));
+
+        let summary = table.summary();
+
+        assert_eq!(
+            summary,
+            vec![
+                RouteSummary {
+                    method: "GET".to_string(),
+                    pattern: "/health".to_string(),
+                },
+                RouteSummary {
+                    method: "POST".to_string(),
+                    pattern: "/users".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn route_summary_display_formats_as_method_and_pattern() {
+        let summary = RouteSummary {
+            method: "GET".to_string(),
+            pattern: "/users/:id".to_string(),
+        };
+
+        assert_eq!(summary.to_string(), "GET /users/:id");
     }
 
     #[test]

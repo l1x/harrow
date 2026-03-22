@@ -26,6 +26,32 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DEFAULT_CONFIG: LazyLock<Arc<O11yConfig>> =
     LazyLock::new(|| Arc::new(O11yConfig::default()));
 
+// --- HTTP server metrics -------------------------------------------------
+
+struct HttpServerMetrics {
+    duration: rolly::metrics::Histogram,
+    errors: rolly::metrics::Counter,
+}
+
+const DURATION_BOUNDARIES: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+static HTTP_METRICS: LazyLock<HttpServerMetrics> = LazyLock::new(|| {
+    let registry = rolly::metrics::global_registry();
+    HttpServerMetrics {
+        duration: registry.histogram(
+            rolly::constants::metrics::REQUEST_DURATION,
+            "Duration of HTTP server requests",
+            DURATION_BOUNDARIES,
+        ),
+        errors: registry.counter(
+            rolly::constants::metrics::ERROR_COUNT,
+            "Count of HTTP server errors (5xx)",
+        ),
+    }
+});
+
 /// Generate a unique 11-character URL-safe request ID.
 ///
 /// Atomic counter + base64 encoding.
@@ -90,6 +116,13 @@ pub async fn o11y_middleware(mut req: Request, next: Next) -> Response {
     // Derive W3C trace ID from request ID.
     let trace_id = derive_trace_id(&request_id);
 
+    // Capture metric labels before `next.run()` consumes the request.
+    let record_metrics = config.otlp_metrics_endpoint.is_some();
+    let method_str = req.method().as_str().to_string();
+    let route_for_metrics = req
+        .route_pattern_arc()
+        .unwrap_or_else(|| Arc::from("<unmatched>"));
+
     // Build span — borrows req fields as &str (zero allocation).
     let span = {
         let method = req.method().as_str();
@@ -113,12 +146,29 @@ pub async fn o11y_middleware(mut req: Request, next: Next) -> Response {
     let span_handle = span.clone();
     let resp = next.run(req).instrument(span).await;
 
-    // Record response fields into the span — no separate event.
-    span_handle.record(fields::HTTP_STATUS_CODE, resp.status_code().as_u16());
-    span_handle.record(
-        fields::HTTP_LATENCY_MS,
-        start.elapsed().as_secs_f64() * 1000.0,
-    );
+    let elapsed = start.elapsed();
+
+    // Record response fields and metrics inside the span scope so rolly
+    // can capture trace/span exemplars on the histogram and counter.
+    let status = resp.status_code().as_u16();
+    span_handle.in_scope(|| {
+        span_handle.record(fields::HTTP_STATUS_CODE, status);
+        span_handle.record(fields::HTTP_LATENCY_MS, elapsed.as_secs_f64() * 1000.0);
+
+        if record_metrics {
+            let metrics = &*HTTP_METRICS;
+            let status_str = status.to_string();
+            let attrs: &[(&str, &str)] = &[
+                ("http.request.method", &method_str),
+                ("http.response.status_code", &status_str),
+                ("http.route", &route_for_metrics),
+            ];
+            metrics.duration.observe(elapsed.as_secs_f64(), attrs);
+            if status >= 400 {
+                metrics.errors.add(1, attrs);
+            }
+        }
+    });
 
     resp.header(&config.request_id_header, &request_id)
 }
@@ -262,5 +312,248 @@ mod tests {
         let a = derive_trace_id("request-1");
         let b = derive_trace_id("request-2");
         assert_ne!(a, b);
+    }
+
+    // -- Helpers for order-independent metric assertions --------------------
+    //
+    // HTTP_METRICS is backed by the process-global rolly registry and counters/
+    // histograms are cumulative, so tests cannot assume a clean slate.  Each
+    // test uses a unique (method, route) fingerprint and searches data points
+    // by attribute match rather than by index.
+
+    /// Build a request with a specific method, URI, route pattern, and state.
+    async fn make_metrics_request(
+        method: &str,
+        uri: &str,
+        route_pattern: Option<&str>,
+        state: TypeMap,
+    ) -> Request {
+        let inner = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(harrow_core::request::full_body(http_body_util::Full::new(
+                bytes::Bytes::new(),
+            )))
+            .unwrap();
+        Request::new(
+            inner,
+            PathMatch::default(),
+            Arc::new(state),
+            route_pattern.map(Arc::from),
+        )
+    }
+
+    fn metrics_config() -> TypeMap {
+        let config = O11yConfig::default().otlp_metrics_endpoint("http://localhost:4318");
+        let mut state = TypeMap::new();
+        state.insert(Arc::new(config));
+        state
+    }
+
+    /// Search counter data points for one matching all given (key, value) pairs.
+    fn find_counter_dp<'a>(
+        snapshots: &'a [rolly::metrics::MetricSnapshot],
+        counter_name: &str,
+        attrs: &[(&str, &str)],
+    ) -> Option<&'a (rolly::metrics::Attrs, i64, Option<rolly::metrics::Exemplar>)> {
+        for snap in snapshots {
+            if let rolly::metrics::MetricSnapshot::Counter {
+                name, data_points, ..
+            } = snap
+            {
+                if name == counter_name {
+                    return data_points.iter().find(|(dp_attrs, _, _)| {
+                        attrs
+                            .iter()
+                            .all(|(k, v)| dp_attrs.iter().any(|(dk, dv)| dk == k && dv == v))
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Search histogram data points for one matching all given (key, value) pairs.
+    fn find_histogram_dp<'a>(
+        snapshots: &'a [rolly::metrics::MetricSnapshot],
+        hist_name: &str,
+        attrs: &[(&str, &str)],
+    ) -> Option<&'a rolly::metrics::HistogramDataPoint> {
+        for snap in snapshots {
+            if let rolly::metrics::MetricSnapshot::Histogram {
+                name, data_points, ..
+            } = snap
+            {
+                if name == hist_name {
+                    return data_points.iter().find(|dp| {
+                        attrs
+                            .iter()
+                            .all(|(k, v)| dp.attrs.iter().any(|(dk, dv)| dk == k && dv == v))
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn metrics_not_recorded_without_endpoint() {
+        init_tracing();
+        // Use a unique (method, route) pair that no other test will produce.
+        // No otlp_metrics_endpoint → record_metrics is false.
+        let req = make_metrics_request(
+            "TRACE",
+            "/disabled-sentinel",
+            Some("/disabled-sentinel"),
+            TypeMap::new(),
+        )
+        .await;
+        let resp = Middleware::call(&o11y_middleware, req, ok_next()).await;
+        assert_eq!(resp.status_code(), http::StatusCode::OK);
+
+        // The global registry must NOT contain a histogram entry for this
+        // unique (TRACE, /disabled-sentinel) attribute set.
+        let global = rolly::metrics::global_registry();
+        let snapshots = global.collect();
+        let dp = find_histogram_dp(
+            &snapshots,
+            rolly::constants::metrics::REQUEST_DURATION,
+            &[
+                ("http.request.method", "TRACE"),
+                ("http.route", "/disabled-sentinel"),
+            ],
+        );
+        assert!(
+            dp.is_none(),
+            "no histogram data point should exist for disabled-metrics request"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_recorded_with_endpoint_configured() {
+        init_tracing();
+        // Unique fingerprint: OPTIONS + /metrics-ok-test
+        let req = make_metrics_request(
+            "OPTIONS",
+            "/metrics-ok-test",
+            Some("/metrics-ok-test"),
+            metrics_config(),
+        )
+        .await;
+        let resp = Middleware::call(&o11y_middleware, req, ok_next()).await;
+        assert_eq!(resp.status_code(), http::StatusCode::OK);
+
+        let global = rolly::metrics::global_registry();
+        let snapshots = global.collect();
+
+        // Duration histogram must contain our data point.
+        let dp = find_histogram_dp(
+            &snapshots,
+            rolly::constants::metrics::REQUEST_DURATION,
+            &[
+                ("http.request.method", "OPTIONS"),
+                ("http.response.status_code", "200"),
+                ("http.route", "/metrics-ok-test"),
+            ],
+        );
+        assert!(
+            dp.is_some(),
+            "expected histogram data point for OPTIONS /metrics-ok-test 200"
+        );
+
+        // 200 OK must NOT produce an error counter entry for this fingerprint.
+        let err_dp = find_counter_dp(
+            &snapshots,
+            rolly::constants::metrics::ERROR_COUNT,
+            &[
+                ("http.request.method", "OPTIONS"),
+                ("http.response.status_code", "200"),
+            ],
+        );
+        assert!(
+            err_dp.is_none(),
+            "200 OK should not produce an error counter entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_error_counter_increments_on_4xx() {
+        init_tracing();
+        // Unique fingerprint: PUT + /err-4xx-test → 404
+        let req = make_metrics_request("PUT", "/err-4xx-test", None, metrics_config()).await;
+        let not_found_next =
+            Next::new(|_req| Box::pin(async { Response::new(http::StatusCode::NOT_FOUND, "") }));
+        let resp = Middleware::call(&o11y_middleware, req, not_found_next).await;
+        assert_eq!(resp.status_code(), http::StatusCode::NOT_FOUND);
+
+        let global = rolly::metrics::global_registry();
+        let snapshots = global.collect();
+
+        let dp = find_counter_dp(
+            &snapshots,
+            rolly::constants::metrics::ERROR_COUNT,
+            &[
+                ("http.request.method", "PUT"),
+                ("http.response.status_code", "404"),
+            ],
+        );
+        assert!(dp.is_some(), "404 should increment error counter");
+        assert!(dp.unwrap().1 >= 1, "counter value must be >= 1");
+    }
+
+    #[tokio::test]
+    async fn metrics_error_counter_increments_on_5xx() {
+        init_tracing();
+        // Unique fingerprint: PATCH + /err-5xx-test → 500
+        let req = make_metrics_request("PATCH", "/err-5xx-test", None, metrics_config()).await;
+        let server_error_next = Next::new(|_req| {
+            Box::pin(async { Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, "") })
+        });
+        let resp = Middleware::call(&o11y_middleware, req, server_error_next).await;
+        assert_eq!(resp.status_code(), http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let global = rolly::metrics::global_registry();
+        let snapshots = global.collect();
+
+        let dp = find_counter_dp(
+            &snapshots,
+            rolly::constants::metrics::ERROR_COUNT,
+            &[
+                ("http.request.method", "PATCH"),
+                ("http.response.status_code", "500"),
+            ],
+        );
+        assert!(dp.is_some(), "500 should increment error counter");
+        assert!(dp.unwrap().1 >= 1, "counter value must be >= 1");
+    }
+
+    #[tokio::test]
+    async fn metrics_duration_histogram_has_correct_labels() {
+        init_tracing();
+        // Unique fingerprint: POST + /users/:id → 200
+        let req =
+            make_metrics_request("POST", "/users/42", Some("/users/:id"), metrics_config()).await;
+        let resp = Middleware::call(&o11y_middleware, req, ok_next()).await;
+        assert_eq!(resp.status_code(), http::StatusCode::OK);
+
+        let global = rolly::metrics::global_registry();
+        let snapshots = global.collect();
+
+        let dp = find_histogram_dp(
+            &snapshots,
+            rolly::constants::metrics::REQUEST_DURATION,
+            &[
+                ("http.request.method", "POST"),
+                ("http.response.status_code", "200"),
+                ("http.route", "/users/:id"),
+            ],
+        );
+        assert!(
+            dp.is_some(),
+            "expected histogram data point with method=POST, route=/users/:id, status=200"
+        );
+        let dp = dp.unwrap();
+        assert!(dp.count >= 1, "histogram count must be >= 1");
+        assert!(dp.sum > 0.0, "histogram sum must be > 0");
     }
 }
