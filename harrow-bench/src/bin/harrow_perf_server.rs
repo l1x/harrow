@@ -20,11 +20,19 @@
 //!   /session/write
 //!
 //! Optional `--o11y` flag enables observability middleware globally.
+//! Optional `--compression` flag enables response compression middleware.
 //!
-//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session]
+//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+const ALLOCATOR_NAME: &str = if cfg!(feature = "mimalloc") {
+    "mimalloc"
+} else {
+    "system"
+};
 
 use harrow::{App, Request, Response};
 use harrow_bench::{
@@ -32,12 +40,13 @@ use harrow_bench::{
     msgpack_10kb_handler, msgpack_small_handler, text_handler,
 };
 
-fn parse_args() -> (String, u16, bool, bool) {
+fn parse_args() -> (String, u16, bool, bool, bool) {
     let args: Vec<String> = std::env::args().collect();
     let mut bind = "127.0.0.1".to_string();
     let mut port: u16 = 3090;
     let mut o11y = false;
     let mut session = false;
+    let mut compression = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -61,21 +70,25 @@ fn parse_args() -> (String, u16, bool, bool) {
                 session = true;
                 i += 1;
             }
+            "--compression" => {
+                compression = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 eprintln!(
-                    "usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session]"
+                    "usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]"
                 );
                 std::process::exit(1);
             }
         }
     }
-    (bind, port, o11y, session)
+    (bind, port, o11y, session, compression)
 }
 
 #[tokio::main]
 async fn main() {
-    let (bind, port, o11y, session) = parse_args();
+    let (bind, port, o11y, session, compression) = parse_args();
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
     let mut app = App::new()
@@ -108,6 +121,11 @@ async fn main() {
         eprintln!("session middleware enabled (4 session routes)");
     }
 
+    if compression {
+        app = app.middleware(harrow::compression_middleware);
+        eprintln!("compression middleware enabled");
+    }
+
     if o11y {
         let otlp_endpoint =
             std::env::var("OTLP_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:4318".to_string());
@@ -125,7 +143,7 @@ async fn main() {
         eprintln!("o11y enabled");
     }
 
-    eprintln!("harrow-perf-server listening on {addr}");
+    eprintln!("harrow-perf-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
     harrow::serve_with_config(
         app,
         addr,

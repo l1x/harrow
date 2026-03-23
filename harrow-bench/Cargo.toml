@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Benchmarks and load driver for Harrow"
 
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 harrow = { path = "../harrow", features = ["json", "msgpack", "timeout", "request-id", "cors", "compression", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
 harrow-core = { workspace = true, features = ["json", "msgpack"] }
@@ -18,9 +22,10 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 toml = "0.8"
 blake3 = { workspace = true }
-mimalloc = { workspace = true }
+mimalloc = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

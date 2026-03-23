@@ -12,6 +12,9 @@
 //!
 //! Session configs are auto-detected by filename prefix (`session-`).  These run
 //! Harrow-only with `--session` passed to the perf server.
+//!
+//! Compression configs are auto-detected by filename prefix (`compression-`).
+//! These run both frameworks with `--compression` passed to the perf server.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,6 +50,12 @@ fn is_session_config(path: &Path) -> bool {
     path.file_stem()
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.starts_with("session-"))
+}
+
+fn is_compression_config(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.starts_with("compression-"))
 }
 
 fn config_name(path: &Path) -> String {
@@ -129,6 +138,36 @@ impl RemoteSide {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Allocator {
+    Mimalloc,
+    System,
+}
+
+impl Allocator {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mimalloc" => Some(Self::Mimalloc),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mimalloc => "mimalloc",
+            Self::System => "system",
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Mimalloc => "",
+            Self::System => "-sysalloc",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Framework {
     Harrow,
@@ -143,17 +182,19 @@ impl Framework {
         }
     }
 
-    fn image(self) -> &'static str {
+    fn image(self, alloc: Allocator) -> String {
+        let suffix = alloc.suffix();
         match self {
-            Self::Harrow => "harrow-perf-server",
-            Self::Axum => "axum-perf-server",
+            Self::Harrow => format!("harrow-perf-server{suffix}"),
+            Self::Axum => format!("axum-perf-server{suffix}"),
         }
     }
 
-    fn container_name(self) -> &'static str {
+    fn container_name(self, alloc: Allocator) -> String {
+        let suffix = alloc.suffix();
         match self {
-            Self::Harrow => "harrow-perf-server",
-            Self::Axum => "axum-perf-server",
+            Self::Harrow => format!("harrow-perf-server{suffix}"),
+            Self::Axum => format!("axum-perf-server{suffix}"),
         }
     }
 
@@ -184,6 +225,64 @@ impl Framework {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompareMode {
+    Framework,
+    Allocator,
+}
+
+impl CompareMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "framework" => Some(Self::Framework),
+            "allocator" => Some(Self::Allocator),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Framework => "framework",
+            Self::Allocator => "allocator",
+        }
+    }
+}
+
+struct Variant {
+    label: String,
+    framework: Framework,
+    allocator: Allocator,
+}
+
+fn comparison_variants(args: &Args) -> Vec<Variant> {
+    match args.compare {
+        CompareMode::Framework => vec![
+            Variant {
+                label: "harrow".into(),
+                framework: Framework::Harrow,
+                allocator: args.allocator,
+            },
+            Variant {
+                label: "axum".into(),
+                framework: Framework::Axum,
+                allocator: args.allocator,
+            },
+        ],
+        CompareMode::Allocator => vec![
+            Variant {
+                label: "mimalloc".into(),
+                framework: args.framework,
+                allocator: Allocator::Mimalloc,
+            },
+            Variant {
+                label: "system".into(),
+                framework: args.framework,
+                allocator: Allocator::System,
+            },
+        ],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Args
 // ---------------------------------------------------------------------------
@@ -204,6 +303,9 @@ struct Args {
     perf_enabled: bool,
     perf_mode: PerfMode,
     spinr_mode: SpinrMode,
+    allocator: Allocator,
+    compare: CompareMode,
+    framework: Framework,
 }
 
 fn client_perf_enabled(args: &Args) -> bool {
@@ -235,7 +337,7 @@ fn usage() -> ! {
     eprintln!(
         "Usage: harrow-remote-perf-test --server-ssh IP --client-ssh IP --server-private IP --instance-type TYPE --config PATH [OPTIONS]\n\
          \n\
-         Runs matched Harrow/Axum perf-server comparisons on two EC2 nodes.\n\
+         Runs matched performance comparisons on two EC2 nodes.\n\
          \n\
          Required:\n\
          \x20 --server-ssh IP        Server public IP (for SSH)\n\
@@ -245,6 +347,8 @@ fn usage() -> ! {
          \x20 --config PATH          Spinr TOML template (repeatable)\n\
          \n\
          Options:\n\
+         \x20 --compare MODE         Comparison mode: framework|allocator (default: framework)\n\
+         \x20 --framework FW         Framework: harrow|axum (default: harrow, used with --compare allocator)\n\
          \x20 --server-flags FLAGS   Extra flags for harrow-perf-server\n\
          \x20 --ssh-user USER        SSH user for both nodes (default: alpine)\n\
          \x20 --port PORT            Server port (default: 3090)\n\
@@ -255,10 +359,11 @@ fn usage() -> ! {
          \x20 --perf                 Collect perf artifacts (default mode: stat)\n\
          \x20 --perf-mode MODE       Perf mode: stat|record|both (default: stat)\n\
          \x20 --spinr-mode MODE      Client mode: docker|host (default: docker)\n\
+         \x20 --allocator ALLOC      Allocator: mimalloc|system (default: mimalloc)\n\
          \n\
          Session configs (filename starts with 'session-') automatically:\n\
          \x20 - pass --session to harrow-perf-server\n\
-         \x20 - skip the Axum comparison run\n"
+         \x20 - skip the second variant comparison run\n"
     );
     std::process::exit(1);
 }
@@ -280,6 +385,9 @@ fn parse_args() -> Args {
     let mut perf_enabled = false;
     let mut perf_mode = PerfMode::Stat;
     let mut spinr_mode = SpinrMode::Docker;
+    let mut allocator = Allocator::Mimalloc;
+    let mut compare = CompareMode::Framework;
+    let mut framework = Framework::Harrow;
 
     let mut i = 1;
     while i < args.len() {
@@ -361,6 +469,31 @@ fn parse_args() -> Args {
                 });
                 i += 2;
             }
+            "--allocator" => {
+                allocator = Allocator::parse(&args[i + 1]).unwrap_or_else(|| {
+                    eprintln!("invalid --allocator: {}", args[i + 1]);
+                    usage();
+                });
+                i += 2;
+            }
+            "--compare" => {
+                compare = CompareMode::parse(&args[i + 1]).unwrap_or_else(|| {
+                    eprintln!("invalid --compare: {}", args[i + 1]);
+                    usage();
+                });
+                i += 2;
+            }
+            "--framework" => {
+                framework = match args[i + 1].as_str() {
+                    "harrow" => Framework::Harrow,
+                    "axum" => Framework::Axum,
+                    other => {
+                        eprintln!("invalid --framework: {other}");
+                        usage();
+                    }
+                };
+                i += 2;
+            }
             "-h" | "--help" => usage(),
             other => {
                 eprintln!("unknown option: {other}");
@@ -419,6 +552,9 @@ fn parse_args() -> Args {
         perf_enabled,
         perf_mode,
         spinr_mode,
+        allocator,
+        compare,
+        framework,
     }
 }
 
@@ -483,9 +619,14 @@ fn scp_to_client(args: &Args, local_path: &Path, remote_path: &str) {
 // Server container management
 // ---------------------------------------------------------------------------
 
-fn start_server_container(args: &Args, framework: Framework, server_flags: &str) {
-    let name = framework.container_name();
-    let image = framework.image();
+fn start_server_container(
+    args: &Args,
+    framework: Framework,
+    allocator: Allocator,
+    server_flags: &str,
+) {
+    let name = framework.container_name(allocator);
+    let image = framework.image(allocator);
     let command = framework.launch_cmd(args.port, server_flags);
     println!(">>> Starting {} on server", framework.as_str());
     let _ = ssh_server(args, &format!("docker rm -f {name} 2>/dev/null || true"));
@@ -507,8 +648,8 @@ fn start_server_container(args: &Args, framework: Framework, server_flags: &str)
     thread::sleep(Duration::from_secs(2));
 }
 
-fn stop_server_container(args: &Args, framework: Framework) {
-    let name = framework.container_name();
+fn stop_server_container(args: &Args, framework: Framework, allocator: Allocator) {
+    let name = framework.container_name(allocator);
     println!(">>> Stopping {} on server", framework.as_str());
     let _ = ssh_server(args, &format!("docker rm -f {name} 2>/dev/null || true"));
 }
@@ -531,8 +672,8 @@ fn wait_for_port(host: &str, port: u16, timeout: Duration) -> Result<(), String>
 // Keys and paths
 // ---------------------------------------------------------------------------
 
-fn run_key(framework: Framework, cfg_name: &str) -> String {
-    format!("{}_{}", framework.as_str(), cfg_name)
+fn run_key(variant_label: &str, cfg_name: &str) -> String {
+    format!("{variant_label}_{cfg_name}")
 }
 
 fn monitor_window_secs(args: &Args) -> u32 {
@@ -611,10 +752,10 @@ fn inferno_available(args: &Args, side: RemoteSide) -> bool {
     )
 }
 
-fn container_pid(args: &Args, framework: Framework) -> Option<u32> {
+fn container_pid(args: &Args, framework: Framework, allocator: Allocator) -> Option<u32> {
     let remote_cmd = format!(
         "docker inspect -f '{{{{.State.Pid}}}}' {}",
-        framework.container_name()
+        framework.container_name(allocator)
     );
     let out = ssh_server(args, &remote_cmd).ok()?;
     if !out.status.success() {
@@ -760,6 +901,7 @@ fn prepare_remote_perf_symfs(
     side: RemoteSide,
     key: &str,
     framework: Option<Framework>,
+    allocator: Allocator,
 ) -> Option<String> {
     let symfs_dir = remote_perf_symfs_dir(key, side);
     let remote_cmd = match side {
@@ -768,7 +910,7 @@ fn prepare_remote_perf_symfs(
             format!(
                 "sh -lc 'rm -rf {symfs_dir}; mkdir -p {symfs_dir}; \
                  docker cp {}:{} {symfs_dir}/{} >/dev/null'",
-                framework.container_name(),
+                framework.container_name(allocator),
                 framework.binary_path(),
                 framework.binary_name()
             )
@@ -932,7 +1074,7 @@ fn host_spinr_perf_cmd(args: &Args, key: &str, spinr_cmd: &str) -> String {
 // Artifact collection
 // ---------------------------------------------------------------------------
 
-fn collect_run_artifacts(args: &Args, framework: Framework, key: &str) {
+fn collect_run_artifacts(args: &Args, framework: Framework, allocator: Allocator, key: &str) {
     if args.os_monitors {
         for suffix in [
             "vmstat.txt",
@@ -1001,6 +1143,7 @@ fn collect_run_artifacts(args: &Args, framework: Framework, key: &str) {
                     } else {
                         None
                     },
+                    allocator,
                 );
 
                 if let Some(symfs_dir) = symfs_dir.as_deref() {
@@ -1048,7 +1191,7 @@ fn parse_connections_from_toml(config_path: &Path) -> u32 {
 fn write_run_meta(
     args: &Args,
     key: &str,
-    framework: Framework,
+    variant: &Variant,
     cfg_name: &str,
     config_path: &Path,
     started_at_utc: &str,
@@ -1056,7 +1199,10 @@ fn write_run_meta(
 ) {
     let meta = serde_json::json!({
         "key": key,
-        "framework": framework.as_str(),
+        "variant": variant.label,
+        "compare_mode": args.compare.as_str(),
+        "framework": variant.framework.as_str(),
+        "allocator": variant.allocator.as_str(),
         "test_case": cfg_name,
         "path": config_path.display().to_string(),
         "concurrency": parse_connections_from_toml(config_path),
@@ -1130,8 +1276,8 @@ fn collect_docker_stats(args: &Args, key: &str) {
     }
 }
 
-fn collect_docker_logs(args: &Args, framework: Framework, key: &str) {
-    let remote_cmd = format!("docker logs {} 2>&1", framework.container_name());
+fn collect_docker_logs(args: &Args, framework: Framework, allocator: Allocator, key: &str) {
+    let remote_cmd = format!("docker logs {} 2>&1", framework.container_name(allocator));
     if let Ok(out) = ssh_server(args, &remote_cmd) {
         let path = args.results_dir.join(format!("logs_{key}.txt"));
         let _ = fs::write(path, &out.stdout);
@@ -1145,35 +1291,41 @@ fn collect_docker_logs(args: &Args, framework: Framework, key: &str) {
 fn run_config(
     args: &Args,
     config_path: &Path,
-    framework: Framework,
+    variant: &Variant,
     results: &mut BTreeMap<String, Value>,
 ) {
     let cfg_name = config_name(config_path);
-    let key = run_key(framework, &cfg_name);
+    let key = run_key(&variant.label, &cfg_name);
+    let framework = variant.framework;
+    let allocator = variant.allocator;
     let is_session = is_session_config(config_path);
+    let is_compression = is_compression_config(config_path);
 
-    // Server flags: only Harrow receives extra flags; Axum rejects unknown args.
-    let server_flags = if framework == Framework::Harrow {
+    // Server flags: session is Harrow-only; compression applies to both frameworks.
+    let server_flags = {
         let mut parts = Vec::new();
-        if is_session {
+        if is_session && framework == Framework::Harrow {
             parts.push("--session".to_string());
         }
-        if let Some(ref flags) = args.server_flags {
+        if is_compression {
+            parts.push("--compression".to_string());
+        }
+        if framework == Framework::Harrow
+            && let Some(ref flags) = args.server_flags
+        {
             parts.push(flags.clone());
         }
         parts.join(" ")
-    } else {
-        String::new()
     };
 
     println!();
-    println!("--- {} / {} ---", framework.as_str(), cfg_name);
+    println!("--- {} / {} ---", variant.label, cfg_name);
 
     // 1. Start server.
-    start_server_container(args, framework, &server_flags);
+    start_server_container(args, framework, allocator, &server_flags);
     if let Err(e) = wait_for_port(&args.server_ssh, args.port, Duration::from_secs(30)) {
         eprintln!("  {e}");
-        stop_server_container(args, framework);
+        stop_server_container(args, framework, allocator);
         std::process::exit(1);
     }
 
@@ -1190,7 +1342,7 @@ fn run_config(
     let _ = fs::remove_file(&local_tmp);
 
     // 3. Start perf/monitors.
-    let server_pid = container_pid(args, framework);
+    let server_pid = container_pid(args, framework, allocator);
     if args.os_monitors {
         start_host_monitors(args, &key, server_pid);
         thread::sleep(Duration::from_secs(MONITOR_MARGIN_SECS as u64));
@@ -1224,19 +1376,19 @@ fn run_config(
     }
 
     // 5. Collect artifacts and stop.
-    collect_run_artifacts(args, framework, &key);
+    collect_run_artifacts(args, framework, allocator, &key);
     write_run_meta(
         args,
         &key,
-        framework,
+        variant,
         &cfg_name,
         config_path,
         &started_at_utc,
         &completed_at_utc,
     );
     collect_docker_stats(args, &key);
-    collect_docker_logs(args, framework, &key);
-    stop_server_container(args, framework);
+    collect_docker_logs(args, framework, allocator, &key);
+    stop_server_container(args, framework, allocator);
     cleanup_remote_file(args, RemoteSide::Client, &remote_config);
 }
 
@@ -1356,7 +1508,8 @@ fn preflight_checks(args: &Args) {
         }
     }
 
-    for image in ["harrow-perf-server", "axum-perf-server"] {
+    for variant in &comparison_variants(args) {
+        let image = variant.framework.image(variant.allocator);
         let out = ssh_server(
             args,
             &format!("docker image inspect {image} >/dev/null 2>&1 && echo ok"),
@@ -1496,8 +1649,15 @@ fn main() {
 
     let config_names: Vec<String> = args.config_paths.iter().map(|p| config_name(p)).collect();
 
+    let variants = comparison_variants(&args);
+    let variant_labels: Vec<&str> = variants.iter().map(|v| v.label.as_str()).collect();
+
     println!("============================================");
-    println!(" Matched Harrow/Axum Performance Test");
+    println!(
+        " Performance Comparison ({}) :: {}",
+        args.compare.as_str(),
+        variant_labels.join(" vs ")
+    );
     println!(" Instance: {}", args.instance_type);
     println!(
         " Server: {} (private: {}:{})",
@@ -1506,6 +1666,7 @@ fn main() {
     println!(" Client: {}", args.client_ssh);
     println!(" Duration: {}s  Warmup: {}s", args.duration, args.warmup);
     println!(" Spinr mode: {}", args.spinr_mode.as_str());
+    println!(" Allocator: {}", args.allocator.as_str());
     println!(" OS monitors: {}", args.os_monitors);
     println!(" Perf: {}", perf_scope_label(&args));
     println!(" Configs: {}", config_names.join(", "));
@@ -1518,21 +1679,27 @@ fn main() {
     for config_path in &args.config_paths {
         let cfg_name = config_name(config_path);
         let is_session = is_session_config(config_path);
+        let is_compression = is_compression_config(config_path);
 
-        println!(
-            "========== CONFIG: {}{} ==========",
-            cfg_name,
-            if is_session { " (session)" } else { "" }
-        );
-
-        let frameworks: Vec<Framework> = if is_session {
-            vec![Framework::Harrow]
+        let tag = if is_session {
+            " (session)"
+        } else if is_compression {
+            " (compression)"
         } else {
-            vec![Framework::Harrow, Framework::Axum]
+            ""
         };
 
-        for framework in &frameworks {
-            run_config(&args, config_path, *framework, &mut results);
+        println!("========== CONFIG: {}{} ==========", cfg_name, tag);
+
+        let run_variants: Vec<&Variant> = if is_session {
+            // Session configs only run the first variant (Harrow-only).
+            variants.iter().take(1).collect()
+        } else {
+            variants.iter().collect()
+        };
+
+        for variant in &run_variants {
+            run_config(&args, config_path, variant, &mut results);
             thread::sleep(SLEEP_BETWEEN_RUNS);
         }
     }

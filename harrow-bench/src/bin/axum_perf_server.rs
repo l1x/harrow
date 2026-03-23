@@ -2,10 +2,19 @@
 //!
 //! Exposes the same flat route corpus as `harrow-perf-server`.
 //!
-//! Usage: axum-perf-server [--bind ADDR] [--port PORT]
+//! Optional `--compression` flag enables response compression middleware.
+//!
+//! Usage: axum-perf-server [--bind ADDR] [--port PORT] [--compression]
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+const ALLOCATOR_NAME: &str = if cfg!(feature = "mimalloc") {
+    "mimalloc"
+} else {
+    "system"
+};
 
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
@@ -47,10 +56,11 @@ async fn health() -> &'static str {
     "ok"
 }
 
-fn parse_args() -> (String, u16) {
+fn parse_args() -> (String, u16, bool) {
     let args: Vec<String> = std::env::args().collect();
     let mut bind = "127.0.0.1".to_string();
     let mut port: u16 = 3090;
+    let mut compression = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -66,22 +76,26 @@ fn parse_args() -> (String, u16) {
                     .expect("invalid port number");
                 i += 2;
             }
+            "--compression" => {
+                compression = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown option: {other}");
-                eprintln!("usage: axum-perf-server [--bind ADDR] [--port PORT]");
+                eprintln!("usage: axum-perf-server [--bind ADDR] [--port PORT] [--compression]");
                 std::process::exit(1);
             }
         }
     }
-    (bind, port)
+    (bind, port, compression)
 }
 
 #[tokio::main]
 async fn main() {
-    let (bind, port) = parse_args();
+    let (bind, port, compression) = parse_args();
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/text", get(text_handler))
         .route("/json/small", get(json_small_handler))
         .route("/json/1kb", get(json_1kb_handler))
@@ -91,7 +105,13 @@ async fn main() {
         .route("/msgpack/10kb", get(msgpack_10kb_handler))
         .route("/health", get(health));
 
+    if compression {
+        use tower_http::compression::CompressionLayer;
+        app = app.layer(CompressionLayer::new());
+        eprintln!("compression middleware enabled");
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    eprintln!("axum-perf-server listening on {addr}");
+    eprintln!("axum-perf-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
     axum::serve(listener, app).await.unwrap();
 }
