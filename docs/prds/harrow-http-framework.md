@@ -31,7 +31,7 @@ Harrow aims to be the framework you reach for when you want Hyper's raw performa
 | P1 | Compile times competitive with or better than Axum for equivalent service definitions. |
 | P1 | Clear, human-readable compiler errors. No deeply nested generic bounds. |
 | P1 | First-class health check, readiness, and liveness endpoints. |
-| P2 | Optional OpenAPI route export from the route table. |
+| P2 | ~~Optional OpenAPI route export from the route table.~~ Done — `openapi` feature generates OpenAPI 3.0.3 JSON from `RouteTable`. |
 | P2 | Graceful shutdown with drain support. |
 
 ### Non-Goals
@@ -146,9 +146,6 @@ for route in app.route_table().iter() {
 for route in app.route_table().summary() {
     println!("{route}");
 }
-
-// Export as JSON for external tooling
-let json = serde_json::to_string_pretty(&app.route_table().summary())?;
 
 // Filter routes by tag
 let user_routes: Vec<&Route> = app.route_table()
@@ -447,7 +444,7 @@ Each milestone (v0.1, v0.2, v0.3) should still include a focused perf review:
 - **Explicit Extractors:** `Result`-based handlers and `require_state()`.
 - **Graceful Shutdown Drain:** Wait for in-flight requests to finish.
 - **O11y Metrics:** Latency histograms and error counters.
-- `RouteTable` serialization (JSON).
+- `RouteTable` introspection: `summary()` returns `Vec<RouteSummary>` with `Display`.
 - `ProblemDetail` (RFC 9457) error response builder.
 - Configurable 404/405 responses.
 

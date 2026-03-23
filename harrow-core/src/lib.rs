@@ -9,6 +9,9 @@ pub mod response;
 pub mod route;
 pub mod state;
 
+#[cfg(feature = "openapi")]
+pub mod openapi;
+
 pub use client::{Client, TestResponse};
 pub use handler::HandlerFn;
 pub use middleware::{Middleware, Next};

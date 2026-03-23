@@ -44,6 +44,43 @@ pub use harrow_middleware::session::{
     session_middleware,
 };
 
+#[cfg(feature = "openapi")]
+pub use harrow_core::openapi::OpenApiInfo;
+
+#[cfg(feature = "openapi")]
+mod openapi_ext {
+    use std::sync::Arc;
+
+    use harrow_core::openapi::OpenApiInfo;
+
+    use crate::App;
+
+    /// Extension trait that registers a `GET {path}/openapi.json` endpoint
+    /// serving the pre-built OpenAPI spec as JSON.
+    pub trait AppOpenApiExt {
+        fn openapi(self, path: &str, info: OpenApiInfo) -> Self;
+    }
+
+    impl AppOpenApiExt for App {
+        fn openapi(self, path: &str, info: OpenApiInfo) -> Self {
+            let json = self.route_table().to_openapi_json(&info);
+            let json = Arc::new(json);
+            let endpoint = format!("{}/openapi.json", path.trim_end_matches('/'));
+
+            self.get(&endpoint, move |_req| {
+                let json = Arc::clone(&json);
+                async move {
+                    crate::Response::text((*json).clone())
+                        .header("content-type", "application/json")
+                }
+            })
+        }
+    }
+}
+
+#[cfg(feature = "openapi")]
+pub use openapi_ext::AppOpenApiExt;
+
 #[cfg(feature = "o11y")]
 pub mod o11y {
     pub use harrow_middleware::o11y::o11y_middleware;
