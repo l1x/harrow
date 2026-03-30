@@ -17,6 +17,35 @@ use harrow::{
     cors_middleware, request_id_middleware, session_middleware, timeout_middleware,
 };
 
+fn parse_args() -> (String, u16) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut bind = "0.0.0.0".to_string();
+    let mut port: u16 = 3000;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bind" => {
+                bind = args.get(i + 1).expect("--bind requires an address").clone();
+                i += 2;
+            }
+            "--port" => {
+                port = args
+                    .get(i + 1)
+                    .expect("--port requires a number")
+                    .parse()
+                    .expect("invalid port number");
+                i += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("usage: vegeta_target_tokio [--bind ADDR] [--port PORT]");
+                std::process::exit(1);
+            }
+        }
+    }
+    (bind, port)
+}
+
 // Basic handlers
 async fn root(_req: Request) -> Response {
     Response::text("hello, world")
@@ -223,10 +252,8 @@ async fn session_destroy(req: Request) -> Response {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let addr = std::env::var("BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
-        .parse()
-        .unwrap();
+    let (bind, port) = parse_args();
+    let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
     // Session configuration
     let session_config = SessionConfig::new([0u8; 32])
@@ -237,11 +264,9 @@ async fn main() {
     let session_store = InMemorySessionStore::new();
 
     let app = App::new()
-        // Default handlers
         .not_found_handler(not_found_handler)
-        // Probes
-        .health("/health")
-        .liveness("/live")
+        .health_handler("/health", health)
+        .liveness_handler("/live", liveness)
         .readiness_handler("/ready", readiness)
         // Middleware (applied in order - outermost first)
         .middleware(request_id_middleware)
@@ -250,8 +275,6 @@ async fn main() {
         .middleware(timeout_middleware(Duration::from_secs(5)))
         // Routes
         .get("/", root)
-        .get("/health", health)
-        .get("/live", liveness)
         // User CRUD API
         .get("/users/:id", get_user)
         .post("/users", create_user)

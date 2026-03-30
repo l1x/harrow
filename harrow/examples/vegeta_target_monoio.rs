@@ -11,9 +11,8 @@
 //!
 //! Run with: cargo run --example vegeta_target_monoio --features monoio,json --no-default-features
 
-use harrow::runtime::monoio::serve;
-use harrow::{App, Request, Response};
-// http crate available through dev-dependencies
+use harrow::runtime::monoio::run;
+use harrow::{App, ProblemDetail, Request, Response};
 
 // Basic handlers
 async fn root(_req: Request) -> Response {
@@ -75,8 +74,12 @@ async fn echo(req: Request) -> Response {
 }
 
 // Error handlers
-async fn not_found_handler(req: Request) -> Response {
-    Response::text(format!("no route for {} {}", req.method(), req.path())).status(404)
+async fn not_found_handler(req: Request) -> ProblemDetail {
+    ProblemDetail::new(http::StatusCode::NOT_FOUND).detail(format!(
+        "no route for {} {}",
+        req.method(),
+        req.path()
+    ))
 }
 
 // CPU-intensive handler - meaningful work to stress CPU
@@ -130,50 +133,24 @@ fn main() {
     let (bind, port) = parse_args();
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
-    // Monoio requires its own runtime
-    let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-        .enable_timer()
-        .build()
-        .expect("failed to create monoio runtime");
+    let app = App::new()
+        .not_found_handler(not_found_handler)
+        .health_handler("/health", health)
+        .liveness_handler("/live", liveness)
+        .readiness_handler("/ready", readiness)
+        .get("/", root)
+        .get("/users/:id", get_user)
+        .post("/users", create_user)
+        .get("/users/:user_id/posts/:post_id", get_user_posts)
+        .post("/echo", echo)
+        .put("/echo", echo)
+        .delete("/echo", |_req| async move { Response::text("deleted") })
+        .get("/cpu", cpu_intensive);
 
-    rt.block_on(async {
-        let app = App::new()
-            // Default handlers
-            .not_found_handler(not_found_handler)
-            // Probes
-            .health_handler("/health", health)
-            .liveness_handler("/live", liveness)
-            .readiness_handler("/ready", readiness)
-            // Routes
-            .get("/", root)
-            // User API
-            .get("/users/:id", get_user)
-            .post("/users", create_user)
-            .get("/users/:user_id/posts/:post_id", get_user_posts)
-            // Echo/utility
-            .post("/echo", echo)
-            .put("/echo", echo)
-            .delete("/echo", |_req| async move { Response::text("deleted") })
-            // Load test scenarios
-            .get("/cpu", cpu_intensive);
+    tracing::info!("Monoio/io_uring server starting on http://{}", addr);
 
-        tracing::info!("Monoio/io_uring server starting on http://{}", addr);
-        tracing::info!("Endpoints:");
-        tracing::info!("  GET  /                    - Root/hello");
-        tracing::info!("  GET  /health              - Health check (JSON)");
-        tracing::info!("  GET  /live                - Liveness probe");
-        tracing::info!("  GET  /ready               - Readiness probe");
-        tracing::info!("  GET  /users/:id           - Get user (path param)");
-        tracing::info!("  POST /users               - Create user (JSON body)");
-        tracing::info!("  GET  /users/:user_id/posts/:post_id - Nested params");
-        tracing::info!("  POST /echo                - Echo JSON");
-        tracing::info!("  PUT  /echo                - Echo JSON");
-        tracing::info!("  DELETE /echo              - Delete");
-        tracing::info!("  GET  /cpu                 - CPU intensive");
-
-        if let Err(e) = serve(app, addr).await {
-            tracing::error!("server error: {}", e);
-            std::process::exit(1);
-        }
-    });
+    if let Err(e) = run(app, addr) {
+        tracing::error!("server error: {}", e);
+        std::process::exit(1);
+    }
 }
