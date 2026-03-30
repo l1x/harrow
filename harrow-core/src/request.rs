@@ -258,6 +258,20 @@ impl std::fmt::Display for BodyError {
 
 impl std::error::Error for BodyError {}
 
+impl crate::response::IntoResponse for BodyError {
+    fn into_response(self) -> crate::response::Response {
+        use http::StatusCode;
+        match &self {
+            BodyError::TooLarge => crate::problem::ProblemDetail::new(StatusCode::PAYLOAD_TOO_LARGE)
+                .detail(self.to_string())
+                .into_response(),
+            _ => crate::problem::ProblemDetail::new(StatusCode::BAD_REQUEST)
+                .detail(self.to_string())
+                .into_response(),
+        }
+    }
+}
+
 /// Convert a `hyper::body::Incoming` into a harrow `Body`.
 /// Called at the server boundary to box the hyper-specific body type.
 pub fn box_incoming(incoming: hyper::body::Incoming) -> Body {
