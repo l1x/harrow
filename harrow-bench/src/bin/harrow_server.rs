@@ -62,11 +62,11 @@ async fn main() {
         .get("/health", health);
 
     eprintln!("harrow listening on {addr}");
-    harrow::serve_with_config(
+    harrow::runtime::tokio::serve_with_config(
         app,
         addr,
         std::future::pending(),
-        harrow::ServerConfig {
+        harrow::runtime::tokio::ServerConfig {
             header_read_timeout: None,
             connection_timeout: None,
             ..Default::default()

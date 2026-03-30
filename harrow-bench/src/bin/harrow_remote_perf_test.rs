@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -38,11 +39,6 @@ const DEFAULT_PORT: u16 = 3090;
 const SSH_USER: &str = "alpine";
 const DEFAULT_SPINR_BIN: &str = "/usr/local/bin/spinr";
 const SLEEP_BETWEEN_RUNS: Duration = Duration::from_secs(2);
-const MONITOR_MARGIN_SECS: u32 = 2;
-const PERF_COUNTERS: &str =
-    "task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults";
-const PERF_RECORD_FREQ_HZ: u32 = 1000;
-const PERF_RECORD_CALL_GRAPH: &str = "fp";
 
 // ---------------------------------------------------------------------------
 // Deployment Mode
@@ -109,7 +105,9 @@ impl LoadGenerator {
 /// A test target - either a spinr TOML config or vegeta target file
 #[derive(Clone, Debug)]
 enum TestTarget {
-    SpintrConfig { path: PathBuf },
+    SpintrConfig {
+        path: PathBuf,
+    },
     VegetaTarget {
         path: PathBuf,
         rate: u32,
@@ -177,6 +175,24 @@ struct VegetaLatencies {
     max: f64,
 }
 
+struct BenchRunResult {
+    value: Option<Value>,
+    error: Option<String>,
+}
+
+impl BenchRunResult {
+    fn success(value: Option<Value>) -> Self {
+        Self { value, error: None }
+    }
+
+    fn failure(value: Option<Value>, error: impl Into<String>) -> Self {
+        Self {
+            value,
+            error: Some(error.into()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Existing Enums (preserved for backward compatibility)
 // ---------------------------------------------------------------------------
@@ -228,17 +244,10 @@ impl PerfMode {
             Self::Both => "both",
         }
     }
-
-    fn collects_stat(self) -> bool {
-        matches!(self, Self::Stat | Self::Both)
-    }
-
-    fn collects_record(self) -> bool {
-        matches!(self, Self::Record | Self::Both)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 enum RemoteSide {
     Server,
     Client,
@@ -352,8 +361,12 @@ impl Framework {
 
     fn launch_cmd(self, backend: Backend, port: u16, extra_flags: &str) -> String {
         let base = match (self, backend) {
-            (Self::Harrow, Backend::Monoio) => format!("/harrow-monoio-server"),
-            (Self::Harrow, Backend::Tokio) => format!("/harrow-perf-server --bind 0.0.0.0 --port {port}"),
+            (Self::Harrow, Backend::Monoio) => {
+                format!("/harrow-monoio-server --bind 0.0.0.0 --port {port}")
+            }
+            (Self::Harrow, Backend::Tokio) => {
+                format!("/harrow-perf-server --bind 0.0.0.0 --port {port}")
+            }
             (Self::Axum, _) => format!("/axum-perf-server --bind 0.0.0.0 --port {port}"),
         };
         if extra_flags.is_empty() {
@@ -363,24 +376,10 @@ impl Framework {
         }
     }
 
-    fn binary_name(self) -> &'static str {
-        match self {
-            Self::Harrow => "harrow-perf-server",
-            Self::Axum => "axum-perf-server",
-        }
-    }
-
-    fn binary_path(self) -> &'static str {
-        match self {
-            Self::Harrow => "/harrow-perf-server",
-            Self::Axum => "/axum-perf-server",
-        }
-    }
-
     fn supports_backend(self, backend: Backend) -> bool {
         match (self, backend) {
-            (Self::Harrow, _) => true,  // Harrow supports both tokio and monoio
-            (Self::Axum, Backend::Monoio) => false,  // Axum only supports tokio
+            (Self::Harrow, _) => true, // Harrow supports both tokio and monoio
+            (Self::Axum, Backend::Monoio) => false, // Axum only supports tokio
             (Self::Axum, Backend::Tokio) => true,
         }
     }
@@ -439,9 +438,9 @@ struct Args {
     results_dir: PathBuf,
 
     // Test targets
-    config_paths: Vec<PathBuf>,    // For spinr
-    target_paths: Vec<PathBuf>,    // For vegeta
-    target_rate: u32,              // For vegeta
+    config_paths: Vec<PathBuf>, // For spinr
+    target_paths: Vec<PathBuf>, // For vegeta
+    target_rate: u32,           // For vegeta
 
     // Server configuration
     server_flags: Option<String>,
@@ -460,15 +459,9 @@ struct Args {
 }
 
 fn client_perf_enabled(args: &Args) -> bool {
-    args.perf_enabled && args.spinr_mode == SpinrMode::Host && args.load_generator == LoadGenerator::Spintr
-}
-
-fn perf_stat_enabled(args: &Args) -> bool {
-    args.perf_enabled && args.perf_mode.collects_stat()
-}
-
-fn perf_record_enabled(args: &Args) -> bool {
-    args.perf_enabled && args.perf_mode.collects_record()
+    args.perf_enabled
+        && args.spinr_mode == SpinrMode::Host
+        && args.load_generator == LoadGenerator::Spintr
 }
 
 fn perf_scope_label(args: &Args) -> String {
@@ -547,39 +540,39 @@ fn usage() -> ! {
 
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
-    
+
     // Mode and generator (required)
     let mut deployment_mode: Option<DeploymentMode> = None;
     let mut load_generator: Option<LoadGenerator> = None;
-    
+
     // Connection settings
     let mut server_ssh: Option<String> = None;
     let mut client_ssh: Option<String> = None;
     let mut server_private: Option<String> = None;
     let mut server_url: Option<String> = None;
     let mut ssh_user = SSH_USER.to_string();
-    
+
     // Instance and test configuration
     let mut instance_type: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut duration: u32 = 60;
     let mut warmup: u32 = 5;
     let mut results_dir_override: Option<PathBuf> = None;
-    
+
     // Test targets
     let mut config_paths: Vec<PathBuf> = Vec::new();
     let mut target_paths: Vec<PathBuf> = Vec::new();
     let mut target_rate: u32 = 1000;
-    
+
     // Server configuration
     let mut server_flags: Option<String> = None;
-    
+
     // Telemetry options
     let mut os_monitors = false;
     let mut perf_enabled = false;
     let mut perf_mode = PerfMode::Stat;
     let mut spinr_mode = SpinrMode::Docker;
-    
+
     // Comparison options
     let mut allocator = Allocator::Mimalloc;
     let mut compare = CompareMode::Framework;
@@ -786,7 +779,9 @@ fn parse_args() -> Args {
         }
         DeploymentMode::Remote => {
             if server_ssh.is_none() || client_ssh.is_none() || server_private.is_none() {
-                eprintln!("error: --server-ssh, --client-ssh, and --server-private are required for remote mode");
+                eprintln!(
+                    "error: --server-ssh, --client-ssh, and --server-private are required for remote mode"
+                );
                 usage();
             }
             if instance_type.is_none() {
@@ -798,9 +793,14 @@ fn parse_args() -> Args {
 
     // Validate backend/framework compatibility
     if !framework.supports_backend(backend) {
-        eprintln!("error: framework '{}' does not support backend '{}'", 
-            framework.as_str(), backend.as_str());
-        eprintln!("note: Axum only supports Tokio backend; use --backend tokio or --framework harrow");
+        eprintln!(
+            "error: framework '{}' does not support backend '{}'",
+            framework.as_str(),
+            backend.as_str()
+        );
+        eprintln!(
+            "note: Axum only supports Tokio backend; use --backend tokio or --framework harrow"
+        );
         usage();
     }
 
@@ -862,7 +862,6 @@ fn parse_args() -> Args {
         backend,
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Helper Functions
@@ -937,11 +936,19 @@ fn ssh_run(user: &str, host: &str, remote_cmd: &str) -> std::io::Result<Output> 
 }
 
 fn ssh_server(args: &Args, remote_cmd: &str) -> std::io::Result<Output> {
-    ssh_run(&args.ssh_user, args.server_ssh.as_deref().unwrap(), remote_cmd)
+    ssh_run(
+        &args.ssh_user,
+        args.server_ssh.as_deref().unwrap(),
+        remote_cmd,
+    )
 }
 
 fn ssh_client(args: &Args, remote_cmd: &str) -> std::io::Result<Output> {
-    ssh_run(&args.ssh_user, args.client_ssh.as_deref().unwrap(), remote_cmd)
+    ssh_run(
+        &args.ssh_user,
+        args.client_ssh.as_deref().unwrap(),
+        remote_cmd,
+    )
 }
 
 fn ssh_side(args: &Args, side: RemoteSide, remote_cmd: &str) -> std::io::Result<Output> {
@@ -972,7 +979,12 @@ fn scp_to_remote(user: &str, host: &str, local_path: &Path, remote_path: &str) {
 }
 
 fn scp_to_client(args: &Args, local_path: &Path, remote_path: &str) {
-    scp_to_remote(&args.ssh_user, args.client_ssh.as_deref().unwrap(), local_path, remote_path);
+    scp_to_remote(
+        &args.ssh_user,
+        args.client_ssh.as_deref().unwrap(),
+        local_path,
+        remote_path,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -992,13 +1004,22 @@ fn run_local(cmd: &str) -> std::io::Result<Output> {
 // Server Container Management
 // ---------------------------------------------------------------------------
 
-fn start_server_container(args: &Args, framework: Framework, allocator: Allocator, server_flags: &str) {
+fn start_server_container(
+    args: &Args,
+    framework: Framework,
+    allocator: Allocator,
+    server_flags: &str,
+) {
     let name = framework.container_name(args.backend, allocator);
     let image = framework.image(args.backend, allocator);
     let command = framework.launch_cmd(args.backend, args.port, server_flags);
-    
-    println!(">>> Starting {} server on {}", framework.as_str(), args.deployment_mode.as_str());
-    
+
+    println!(
+        ">>> Starting {} server on {}",
+        framework.as_str(),
+        args.deployment_mode.as_str()
+    );
+
     match args.deployment_mode {
         DeploymentMode::Local => {
             // Stop any existing container
@@ -1011,7 +1032,11 @@ fn start_server_container(args: &Args, framework: Framework, allocator: Allocato
                 Ok(o) if o.status.success() => {}
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    eprintln!("  warning: docker run {} stderr: {}", framework.as_str(), stderr.trim());
+                    eprintln!(
+                        "  warning: docker run {} stderr: {}",
+                        framework.as_str(),
+                        stderr.trim()
+                    );
                 }
                 Err(e) => eprintln!("  failed to start {}: {e}", framework.as_str()),
             }
@@ -1025,7 +1050,11 @@ fn start_server_container(args: &Args, framework: Framework, allocator: Allocato
                 Ok(o) if o.status.success() => {}
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    eprintln!("  warning: docker run {} stderr: {}", framework.as_str(), stderr.trim());
+                    eprintln!(
+                        "  warning: docker run {} stderr: {}",
+                        framework.as_str(),
+                        stderr.trim()
+                    );
                 }
                 Err(e) => eprintln!("  failed to start {}: {e}", framework.as_str()),
             }
@@ -1037,7 +1066,7 @@ fn start_server_container(args: &Args, framework: Framework, allocator: Allocato
 fn stop_server_container(args: &Args, framework: Framework, allocator: Allocator) {
     let name = framework.container_name(args.backend, allocator);
     println!(">>> Stopping {} server", framework.as_str());
-    
+
     match args.deployment_mode {
         DeploymentMode::Local => {
             let _ = run_local(&format!("docker rm -f {name} 2>/dev/null || true"));
@@ -1048,35 +1077,64 @@ fn stop_server_container(args: &Args, framework: Framework, allocator: Allocator
     }
 }
 
+fn http_health_check(host: &str, port: u16) -> bool {
+    let addr = match format!("{host}:{port}").parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut buf = [0u8; 256];
+    let n = match stream.read(&mut buf) {
+        Ok(n) if n > 0 => n,
+        _ => return false,
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
+}
+
 fn wait_for_server(args: &Args, timeout: Duration) -> Result<(), String> {
     let (host, port) = match args.deployment_mode {
         DeploymentMode::Local => ("localhost", args.port),
         DeploymentMode::Remote => (args.server_ssh.as_deref().unwrap(), args.port),
     };
-    
+
     let deadline = Instant::now() + timeout;
     let addr = format!("{host}:{port}");
     println!("    Waiting for {addr}...");
-    
+
     while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok() {
-            println!("    Health check passed");
+        if http_health_check(host, port) {
+            println!("    Health endpoint passed");
             return Ok(());
         }
         thread::sleep(Duration::from_millis(500));
     }
-    Err(format!("server on {addr} did not start within {timeout:?}"))
+    Err(format!(
+        "server on {addr} did not pass GET /health within {timeout:?}"
+    ))
 }
 
+#[allow(dead_code)]
 fn container_pid(args: &Args, framework: Framework, allocator: Allocator) -> Option<u32> {
     let name = framework.container_name(args.backend, allocator);
     let remote_cmd = format!("docker inspect -f '{{{{.State.Pid}}}}' {name}");
-    
+
     let out = match args.deployment_mode {
         DeploymentMode::Local => run_local(&remote_cmd).ok(),
         DeploymentMode::Remote => ssh_server(args, &remote_cmd).ok(),
     }?;
-    
+
     if !out.status.success() {
         return None;
     }
@@ -1087,6 +1145,79 @@ fn container_pid(args: &Args, framework: Framework, allocator: Allocator) -> Opt
 // Load Generator Implementations
 // ---------------------------------------------------------------------------
 
+fn spinr_metrics<'a>(value: &'a Value) -> &'a Value {
+    value.pointer("/scenarios/0/metrics").unwrap_or(value)
+}
+
+fn metric_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn format_status_codes(value: &Value) -> String {
+    value
+        .get("status_codes")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "-".into())
+}
+
+fn format_status_code_map(codes: &BTreeMap<String, u64>) -> String {
+    if codes.is_empty() {
+        return "-".into();
+    }
+    codes
+        .iter()
+        .map(|(status, count)| format!("{status}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn validate_spinr_metrics(metrics: &Value) -> Result<f64, String> {
+    let successful = metric_u64(metrics, "successful_requests").unwrap_or_default();
+    let failed = metric_u64(metrics, "failed_requests").unwrap_or_default();
+    let total = metric_u64(metrics, "total_requests").unwrap_or(successful + failed);
+    let success_rate = if total > 0 {
+        successful as f64 / total as f64
+    } else if failed == 0 {
+        1.0
+    } else {
+        0.0
+    };
+
+    if successful == 0 {
+        return Err(format!(
+            "benchmark produced no successful requests (status_codes={})",
+            format_status_codes(metrics)
+        ));
+    }
+    if failed > 0 {
+        return Err(format!(
+            "benchmark reported {failed} failed requests out of {total} (success={:.1}%, status_codes={})",
+            success_rate * 100.0,
+            format_status_codes(metrics)
+        ));
+    }
+
+    Ok(success_rate)
+}
+
+fn validate_vegeta_metrics(metrics: &VegetaMetrics) -> Result<(), String> {
+    if metrics.success <= 0.0 {
+        return Err(format!(
+            "benchmark produced no successful requests (status_codes={})",
+            format_status_code_map(&metrics.status_codes)
+        ));
+    }
+    if metrics.success < 1.0 {
+        return Err(format!(
+            "benchmark reported failed requests (success={:.1}%, status_codes={})",
+            metrics.success * 100.0,
+            format_status_code_map(&metrics.status_codes)
+        ));
+    }
+
+    Ok(())
+}
+
 /// Run a spinr benchmark
 fn run_spinr_bench(
     args: &Args,
@@ -1094,7 +1225,7 @@ fn run_spinr_bench(
     config_path: &Path,
     rendered_config: &str,
     outfile: &Path,
-) -> Option<Value> {
+) -> BenchRunResult {
     let spinr_cmd = format!("{DEFAULT_SPINR_BIN} bench {} -j", config_path.display());
 
     match args.deployment_mode {
@@ -1102,7 +1233,7 @@ fn run_spinr_bench(
             // Write config to temp file locally
             let local_tmp = std::env::temp_dir().join(format!("{key}.toml"));
             let _ = fs::write(&local_tmp, rendered_config);
-            
+
             let cmd = match args.spinr_mode {
                 SpinrMode::Docker => format!(
                     "docker run --rm --network host --ulimit nofile=65535:65535 \\
@@ -1111,35 +1242,53 @@ fn run_spinr_bench(
                 ),
                 SpinrMode::Host => spinr_cmd.replace(
                     &*config_path.to_string_lossy(),
-                    &*local_tmp.to_string_lossy()
+                    &*local_tmp.to_string_lossy(),
                 ),
             };
-            
+
             let result = run_local(&cmd);
             let _ = fs::remove_file(&local_tmp);
-            
+
             match result {
                 Ok(o) if o.status.success() => {
                     let _ = fs::write(outfile, &o.stdout);
                     let val: Option<Value> = serde_json::from_slice(&o.stdout).ok();
                     if let Some(ref v) = val {
-                        let metrics = v.pointer("/scenarios/0/metrics").unwrap_or(v);
+                        let metrics = spinr_metrics(v);
+                        let validation = validate_spinr_metrics(metrics);
+                        let success_rate = validation.as_ref().copied().unwrap_or_else(|_| {
+                            let successful =
+                                metric_u64(metrics, "successful_requests").unwrap_or_default();
+                            let failed = metric_u64(metrics, "failed_requests").unwrap_or_default();
+                            let total = metric_u64(metrics, "total_requests")
+                                .unwrap_or(successful + failed);
+                            if total > 0 {
+                                successful as f64 / total as f64
+                            } else {
+                                0.0
+                            }
+                        });
                         println!(
-                            "    -> rps={} p99={}ms",
+                            "    -> rps={} p99={}ms success={:.1}%",
                             val_str(metrics, "rps"),
-                            val_str(metrics, "latency_p99_ms")
+                            val_str(metrics, "latency_p99_ms"),
+                            success_rate * 100.0
                         );
+                        return match validation {
+                            Ok(_) => BenchRunResult::success(val),
+                            Err(error) => BenchRunResult::failure(val, error),
+                        };
                     }
-                    val
+                    BenchRunResult::failure(None, "spinr returned non-JSON output")
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     eprintln!("    bench failed (exit {}): {}", o.status, stderr.trim());
-                    None
+                    BenchRunResult::failure(None, "spinr benchmark command failed")
                 }
                 Err(e) => {
                     eprintln!("    failed to run bench: {e}");
-                    None
+                    BenchRunResult::failure(None, format!("failed to run spinr benchmark: {e}"))
                 }
             }
         }
@@ -1164,23 +1313,41 @@ fn run_spinr_bench(
                     let _ = fs::write(outfile, &o.stdout);
                     let val: Option<Value> = serde_json::from_slice(&o.stdout).ok();
                     if let Some(ref v) = val {
-                        let metrics = v.pointer("/scenarios/0/metrics").unwrap_or(v);
+                        let metrics = spinr_metrics(v);
+                        let validation = validate_spinr_metrics(metrics);
+                        let success_rate = validation.as_ref().copied().unwrap_or_else(|_| {
+                            let successful =
+                                metric_u64(metrics, "successful_requests").unwrap_or_default();
+                            let failed = metric_u64(metrics, "failed_requests").unwrap_or_default();
+                            let total = metric_u64(metrics, "total_requests")
+                                .unwrap_or(successful + failed);
+                            if total > 0 {
+                                successful as f64 / total as f64
+                            } else {
+                                0.0
+                            }
+                        });
                         println!(
-                            "    -> rps={} p99={}ms",
+                            "    -> rps={} p99={}ms success={:.1}%",
                             val_str(metrics, "rps"),
-                            val_str(metrics, "latency_p99_ms")
+                            val_str(metrics, "latency_p99_ms"),
+                            success_rate * 100.0
                         );
+                        return match validation {
+                            Ok(_) => BenchRunResult::success(val),
+                            Err(error) => BenchRunResult::failure(val, error),
+                        };
                     }
-                    val
+                    BenchRunResult::failure(None, "spinr returned non-JSON output")
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     eprintln!("    bench failed (exit {}): {}", o.status, stderr.trim());
-                    None
+                    BenchRunResult::failure(None, "spinr benchmark command failed")
                 }
                 Err(e) => {
                     eprintln!("    failed to run bench: {e}");
-                    None
+                    BenchRunResult::failure(None, format!("failed to run spinr benchmark: {e}"))
                 }
             }
         }
@@ -1196,80 +1363,90 @@ fn run_vegeta_bench(
     duration_secs: u32,
     server_url: &str,
     outfile: &Path,
-) -> Option<Value> {
+) -> BenchRunResult {
     // Read and update target file with server URL
-    let target_content = fs::read_to_string(target_path).ok()?;
+    let target_content = match fs::read_to_string(target_path) {
+        Ok(content) => content,
+        Err(e) => {
+            return BenchRunResult::failure(
+                None,
+                format!(
+                    "failed to read vegeta target {}: {e}",
+                    target_path.display()
+                ),
+            );
+        }
+    };
     let updated_target = target_content.replace("{{ server_url }}", server_url);
-    
+
     // Create temp target file
     let temp_target = std::env::temp_dir().join(format!("{key}.targets"));
     let _ = fs::write(&temp_target, updated_target);
-    
+
     let duration_str = format!("{duration_secs}s");
-    let bin_file = format!("/tmp/{key}.bin");
-    
-    let vegeta_cmd = format!(
-        "vegeta attack -targets={} -duration={} -rate={}/s -output={} && \\\n         vegeta report -type=json {}",
-        temp_target.display(),
-        duration_str,
-        rate,
-        bin_file,
-        bin_file
-    );
-    
+
     println!("  [{key}] -> vegeta attack -duration={duration_str} -rate={rate}/s");
 
+    // Use Docker to run vegeta (consistent with spinr)
     let result = match args.deployment_mode {
         DeploymentMode::Local => {
-            run_local(&vegeta_cmd)
+            let docker_cmd = format!(
+                "docker run --rm --network host -v {}:/targets.txt vegeta:arm64 attack -targets=/targets.txt -duration={} -rate={}/s | docker run --rm -i vegeta:arm64 report -type=json",
+                temp_target.display(),
+                duration_str,
+                rate
+            );
+            run_local(&docker_cmd)
         }
         DeploymentMode::Remote => {
             // Upload target file to client
             let remote_target = format!("/tmp/{key}.targets");
             scp_to_client(args, &temp_target, &remote_target);
-            
+
             let remote_cmd = format!(
-                "vegeta attack -targets={remote_target} -duration={duration_str} -rate={rate}/s -output={bin_file} && \\
-                 vegeta report -type=json {bin_file}"
+                "docker run --rm --network host -v {remote_target}:/targets.txt vegeta:arm64 attack -targets=/targets.txt -duration={duration_str} -rate={rate}/s | docker run --rm -i vegeta:arm64 report -type=json"
             );
             ssh_client(args, &remote_cmd)
         }
     };
-    
+
     let _ = fs::remove_file(&temp_target);
 
     match result {
         Ok(o) if o.status.success() => {
             // Parse vegeta JSON output and convert to common format
             let vegeta_metrics: Option<VegetaMetrics> = serde_json::from_slice(&o.stdout).ok();
-            
+
             if let Some(metrics) = vegeta_metrics {
                 // Convert vegeta metrics to spinr-compatible format
                 let converted = convert_vegeta_to_spinr_format(&metrics);
                 let _ = fs::write(outfile, serde_json::to_vec_pretty(&converted).unwrap());
-                
+
                 println!(
                     "    -> rps={:.0} p99={:.3}ms success={:.1}%",
                     metrics.throughput,
                     metrics.latencies.p99 / 1_000_000.0, // Convert ns to ms
                     metrics.success * 100.0
                 );
-                
-                Some(converted)
+
+                match validate_vegeta_metrics(&metrics) {
+                    Ok(()) => BenchRunResult::success(Some(converted)),
+                    Err(error) => BenchRunResult::failure(Some(converted), error),
+                }
             } else {
                 // Save raw output
                 let _ = fs::write(outfile, &o.stdout);
-                serde_json::from_slice(&o.stdout).ok()
+                BenchRunResult::failure(None, "vegeta returned non-JSON output")
             }
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             eprintln!("    vegeta failed (exit {}): {}", o.status, stderr.trim());
-            None
+            BenchRunResult::failure(None, "vegeta benchmark command failed")
         }
         Err(e) => {
             eprintln!("    failed to run vegeta: {e}");
-            None
+            BenchRunResult::failure(None, format!("failed to run vegeta benchmark: {e}"))
         }
     }
 }
@@ -1278,7 +1455,7 @@ fn run_vegeta_bench(
 fn convert_vegeta_to_spinr_format(metrics: &VegetaMetrics) -> Value {
     // Convert nanoseconds to milliseconds
     let ns_to_ms = |ns: f64| ns / 1_000_000.0;
-    
+
     serde_json::json!({
         "scenarios": [{
             "metrics": {
@@ -1303,14 +1480,15 @@ fn run_key(variant_label: &str, cfg_name: &str) -> String {
     format!("{variant_label}_{cfg_name}")
 }
 
+#[allow(dead_code)]
 fn pull_remote_file(args: &Args, side: RemoteSide, remote_path: &str, local_path: &Path) {
     let remote_cmd = format!("test -f {remote_path} && cat {remote_path}");
-    
+
     let result = match args.deployment_mode {
         DeploymentMode::Local => run_local(&format!("cat {remote_path}")),
         DeploymentMode::Remote => ssh_side(args, side, &remote_cmd),
     };
-    
+
     match result {
         Ok(o) if o.status.success() => {
             let _ = fs::write(local_path, &o.stdout);
@@ -1335,8 +1513,12 @@ fn pull_remote_file(args: &Args, side: RemoteSide, remote_path: &str, local_path
 fn cleanup_remote_file(args: &Args, side: RemoteSide, remote_path: &str) {
     let cmd = format!("rm -f {remote_path}");
     match args.deployment_mode {
-        DeploymentMode::Local => { let _ = run_local(&cmd); }
-        DeploymentMode::Remote => { let _ = ssh_side(args, side, &cmd); }
+        DeploymentMode::Local => {
+            let _ = run_local(&cmd);
+        }
+        DeploymentMode::Remote => {
+            let _ = ssh_side(args, side, &cmd);
+        }
     }
 }
 
@@ -1376,13 +1558,14 @@ fn write_run_meta(
 }
 
 fn collect_docker_stats(args: &Args, key: &str) {
-    let cmd = "docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}'";
-    
+    let cmd =
+        "docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}'";
+
     let result = match args.deployment_mode {
         DeploymentMode::Local => run_local(cmd),
         DeploymentMode::Remote => ssh_server(args, cmd),
     };
-    
+
     if let Ok(out) = result {
         let path = args.results_dir.join(format!("stats_{key}.txt"));
         let _ = fs::write(path, &out.stdout);
@@ -1392,12 +1575,12 @@ fn collect_docker_stats(args: &Args, key: &str) {
 fn collect_docker_logs(args: &Args, framework: Framework, allocator: Allocator, key: &str) {
     let name = framework.container_name(args.backend, allocator);
     let cmd = format!("docker logs {name} 2>&1");
-    
+
     let result = match args.deployment_mode {
         DeploymentMode::Local => run_local(&cmd),
         DeploymentMode::Remote => ssh_server(args, &cmd),
     };
-    
+
     if let Ok(out) = result {
         let path = args.results_dir.join(format!("logs_{key}.txt"));
         let _ = fs::write(path, &out.stdout);
@@ -1428,7 +1611,9 @@ fn run_config(
         if target.is_compression_config() {
             parts.push("--compression".to_string());
         }
-        if framework == Framework::Harrow && let Some(ref flags) = args.server_flags {
+        if framework == Framework::Harrow
+            && let Some(ref flags) = args.server_flags
+        {
             parts.push(flags.clone());
         }
         parts.join(" ")
@@ -1448,7 +1633,7 @@ fn run_config(
     // 2. Run the benchmark
     let outfile = args.results_dir.join(format!("{key}.json"));
     let started_at_utc = chrono_lite_utc();
-    
+
     let result = match (args.load_generator, target) {
         (LoadGenerator::Spintr, TestTarget::SpintrConfig { path }) => {
             // Render template
@@ -1456,43 +1641,65 @@ fn run_config(
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
             let server_addr = match args.deployment_mode {
                 DeploymentMode::Local => format!("localhost:{}", args.port),
-                DeploymentMode::Remote => format!("{}:{}", args.server_private.as_deref().unwrap(), args.port),
+                DeploymentMode::Remote => {
+                    format!("{}:{}", args.server_private.as_deref().unwrap(), args.port)
+                }
             };
             let rendered = render_template(&raw, &server_addr, args.duration, args.warmup);
-            
+
             let _remote_config = format!("/tmp/{cfg_name}.toml");
             run_spinr_bench(args, &key, path, &rendered, &outfile)
         }
-        (LoadGenerator::Vegeta, TestTarget::VegetaTarget { path, rate, duration_secs }) => {
-            let server_url = args.server_url.as_deref().unwrap_or("http://localhost:3000");
-            run_vegeta_bench(args, &key, path, *rate, *duration_secs, server_url, &outfile)
+        (
+            LoadGenerator::Vegeta,
+            TestTarget::VegetaTarget {
+                path,
+                rate,
+                duration_secs,
+            },
+        ) => {
+            let server_url = args
+                .server_url
+                .as_deref()
+                .unwrap_or("http://localhost:3000");
+            run_vegeta_bench(
+                args,
+                &key,
+                path,
+                *rate,
+                *duration_secs,
+                server_url,
+                &outfile,
+            )
         }
         _ => {
             eprintln!("  error: mismatched load generator and target type");
-            None
+            BenchRunResult::failure(None, "mismatched load generator and target type")
         }
     };
-    
+
     let completed_at_utc = chrono_lite_utc();
 
-    if let Some(v) = result {
-        results.insert(key.clone(), v);
+    if result.error.is_none() {
+        if let Some(v) = result.value.clone() {
+            results.insert(key.clone(), v);
+        }
+        write_run_meta(
+            args,
+            &key,
+            variant,
+            &cfg_name,
+            target.path(),
+            &started_at_utc,
+            &completed_at_utc,
+        );
     }
 
     // 3. Collect artifacts and stop
-    write_run_meta(
-        args,
-        &key,
-        variant,
-        &cfg_name,
-        target.path(),
-        &started_at_utc,
-        &completed_at_utc,
-    );
     collect_docker_stats(args, &key);
     collect_docker_logs(args, framework, allocator, &key);
     stop_server_container(args, framework, allocator);
-    
+
     // Cleanup remote files
     if args.deployment_mode == DeploymentMode::Remote {
         match args.load_generator {
@@ -1504,6 +1711,11 @@ fn run_config(
                 cleanup_remote_file(args, RemoteSide::Client, &format!("/tmp/{key}.bin"));
             }
         }
+    }
+
+    if let Some(error) = result.error {
+        eprintln!("  benchmark validation failed: {error}");
+        std::process::exit(1);
     }
 }
 
@@ -1568,12 +1780,14 @@ fn preflight_checks(args: &Args) {
                 match run_local("command -v vegeta >/dev/null && echo ok") {
                     Ok(o) if o.status.success() => println!("  Vegeta: ok"),
                     _ => {
-                        eprintln!("  Vegeta: MISSING — install with: go install github.com/tsenart/vegeta@latest");
+                        eprintln!(
+                            "  Vegeta: MISSING — install with: go install github.com/tsenart/vegeta@latest"
+                        );
                         std::process::exit(1);
                     }
                 }
             }
-            
+
             // Check spinr if using spinr in host mode
             if args.load_generator == LoadGenerator::Spintr && args.spinr_mode == SpinrMode::Host {
                 match run_local(&format!("test -x {DEFAULT_SPINR_BIN} && echo ok")) {
@@ -1628,12 +1842,12 @@ fn preflight_checks(args: &Args) {
     for variant in &comparison_variants(args) {
         let image = variant.framework.image(args.backend, variant.allocator);
         let cmd = format!("docker image inspect {image} >/dev/null 2>&1 && echo ok");
-        
+
         let result = match args.deployment_mode {
             DeploymentMode::Local => run_local(&cmd),
             DeploymentMode::Remote => ssh_server(args, &cmd),
         };
-        
+
         match result {
             Ok(o) if o.status.success() => println!("  Image {image}: ok"),
             _ => {
@@ -1659,11 +1873,13 @@ fn main() {
 
     // Build test targets list
     let targets: Vec<TestTarget> = match args.load_generator {
-        LoadGenerator::Spintr => args.config_paths
+        LoadGenerator::Spintr => args
+            .config_paths
             .iter()
             .map(|p| TestTarget::SpintrConfig { path: p.clone() })
             .collect(),
-        LoadGenerator::Vegeta => args.target_paths
+        LoadGenerator::Vegeta => args
+            .target_paths
             .iter()
             .map(|p| TestTarget::VegetaTarget {
                 path: p.clone(),
@@ -1686,8 +1902,11 @@ fn main() {
     if variant_labels.len() > 1 {
         println!(" Comparison: {}", variant_labels.join(" vs "));
     }
-    println!(" Instance: {}", args.instance_type.as_deref().unwrap_or("unknown"));
-    
+    println!(
+        " Instance: {}",
+        args.instance_type.as_deref().unwrap_or("unknown")
+    );
+
     match args.deployment_mode {
         DeploymentMode::Local => {
             println!(" Server URL: {}", args.server_url.as_deref().unwrap());
@@ -1702,7 +1921,7 @@ fn main() {
             println!(" Client: {}", args.client_ssh.as_deref().unwrap());
         }
     }
-    
+
     println!(" Duration: {}s  Warmup: {}s", args.duration, args.warmup);
     if args.load_generator == LoadGenerator::Vegeta {
         println!(" Rate: {} req/s", args.target_rate);

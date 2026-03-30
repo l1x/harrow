@@ -10,11 +10,12 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-harrow = { path = "../harrow", features = ["tokio", "json", "msgpack", "timeout", "request-id", "cors", "compression", "compression-br", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
+harrow = { path = "../harrow", features = ["tokio", "monoio", "json", "msgpack", "timeout", "request-id", "cors", "compression", "compression-br", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
 harrow-core = { workspace = true, features = ["json", "msgpack"] }
 harrow-o11y = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+monoio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
@@ -24,6 +25,7 @@ bytes = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["compression-gzip", "compression-br"] }
 toml = "0.8"
+minijinja = "2.12"
 blake3 = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 
@@ -81,12 +83,24 @@ name = "harrow-perf-server"
 path = "src/bin/harrow_perf_server.rs"
 
 [[bin]]
+name = "harrow-monoio-server"
+path = "src/bin/harrow_monoio_perf_server.rs"
+
+[[bin]]
 name = "axum-perf-server"
 path = "src/bin/axum_perf_server.rs"
 
 [[bin]]
 name = "harrow-remote-perf-test"
 path = "src/bin/harrow_remote_perf_test.rs"
+
+[[bin]]
+name = "bench-single"
+path = "src/bin/bench_single.rs"
+
+[[bin]]
+name = "bench-compare"
+path = "src/bin/bench_compare.rs"
 
 [[bin]]
 name = "stat-bench"

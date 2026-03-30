@@ -3,6 +3,7 @@
 //! Provides a minimal keep-alive HTTP/1.1 client and server helpers
 //! so benchmarks measure framework overhead, not client library cost.
 
+pub mod harness;
 pub mod perf_summary;
 
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ pub async fn start_server(app: App) -> SocketAddr {
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        harrow::serve_with_shutdown(app, addr, async {
+        harrow::runtime::tokio::serve_with_shutdown(app, addr, async {
             let _ = rx.await;
         })
         .await

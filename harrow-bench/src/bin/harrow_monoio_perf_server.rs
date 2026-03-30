@@ -1,7 +1,8 @@
-//! Harrow performance benchmark server.
+//! Harrow Monoio performance benchmark server.
 //!
-//! Exposes the same flat route corpus as `axum-perf-server` so routing and
-//! serialization comparisons are structurally matched.
+//! Exposes the same flat route corpus as `harrow-perf-server` so remote
+//! framework comparisons stay structurally matched when the monoio backend is
+//! selected.
 //!
 //! Routes:
 //!   /text
@@ -22,7 +23,7 @@
 //! Optional `--o11y` flag enables observability middleware globally.
 //! Optional `--compression` flag enables response compression middleware.
 //!
-//! Usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]
+//! Usage: harrow-monoio-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -77,7 +78,7 @@ fn parse_args() -> (String, u16, bool, bool, bool) {
             other => {
                 eprintln!("unknown option: {other}");
                 eprintln!(
-                    "usage: harrow-perf-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]"
+                    "usage: harrow-monoio-server [--bind ADDR] [--port PORT] [--o11y] [--session] [--compression]"
                 );
                 std::process::exit(1);
             }
@@ -86,8 +87,7 @@ fn parse_args() -> (String, u16, bool, bool, bool) {
     (bind, port, o11y, session, compression)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let (bind, port, o11y, session, compression) = parse_args();
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap();
 
@@ -109,7 +109,13 @@ async fn main() {
         };
 
         let store = InMemorySessionStore::new();
-        seed_bench_session(&store).await;
+        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+            .enable_timer()
+            .build()
+            .expect("failed to create monoio runtime for session seeding");
+        rt.block_on(async {
+            seed_bench_session(&store).await;
+        });
 
         app = app
             .middleware(session_middleware(store, bench_session_config()))
@@ -143,18 +149,16 @@ async fn main() {
         eprintln!("o11y enabled");
     }
 
-    eprintln!("harrow-perf-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
-    harrow::runtime::tokio::serve_with_config(
+    eprintln!("harrow-monoio-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
+    harrow::runtime::monoio::run_with_config(
         app,
         addr,
-        std::future::pending(),
-        harrow::runtime::tokio::ServerConfig {
+        harrow::runtime::monoio::ServerConfig {
             header_read_timeout: None,
             connection_timeout: None,
             ..Default::default()
         },
     )
-    .await
     .unwrap();
 }
 

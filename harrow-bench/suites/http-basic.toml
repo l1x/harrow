@@ -1,0 +1,15 @@
+name = "http-basic"
+description = "Basic HTTP benchmark cases using Spinr and Vegeta templates"
+
+[[case]]
+id = "text-c128"
+generator = "spinr"
+template = "../spinr/text-c128.toml"
+concurrency = 128
+
+[[case]]
+id = "text-vegeta-c128"
+generator = "vegeta"
+template = "../vegeta/text-c128.targets.j2"
+concurrency = 128
+rate = 200000

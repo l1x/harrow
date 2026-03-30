@@ -1,10 +1,10 @@
 [[scenario]]
 name = "compression-json-1kb-c128"
-url = "http://{{ server }}/json/1kb"
+url = "{{ base_url }}/json/1kb"
 connections = 128
 max_throughput = true
-duration = {{ duration }}
-warmup = {{ warmup }}
+duration = {{ duration_secs }}
+warmup = {{ warmup_secs }}
 
 [scenario.headers]
 Accept-Encoding = "gzip, br"
