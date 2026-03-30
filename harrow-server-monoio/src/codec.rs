@@ -267,6 +267,51 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
+    use proptest::prelude::*;
+
+    #[test]
+    fn fuzz_http_request_parsing() {
+        check!().for_each(|input: &[u8]| {
+            match try_parse_request(input) {
+                Ok(parsed) => {
+                    assert!(parsed.header_len <= input.len());
+                    assert!(!(parsed.content_length.is_some() && parsed.chunked));
+                }
+                Err(CodecError::Incomplete | CodecError::Invalid(_)) => {}
+                Err(CodecError::BodyTooLarge) => {
+                    panic!("BodyTooLarge from try_parse_request is unexpected");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn fuzz_chunked_decode() {
+        check!().for_each(|input: &[u8]| {
+            // No limit
+            match decode_chunked_with_limit(input, None) {
+                Ok(Some((body, consumed))) => {
+                    assert!(consumed <= input.len());
+                    let _ = body.len();
+                }
+                Ok(None) => {}
+                Err(CodecError::Invalid(_) | CodecError::Incomplete) => {}
+                Err(CodecError::BodyTooLarge) => {
+                    panic!("BodyTooLarge with no limit is unexpected");
+                }
+            }
+            // With limit
+            match decode_chunked_with_limit(input, Some(64)) {
+                Ok(Some((body, consumed))) => {
+                    assert!(consumed <= input.len());
+                    assert!(body.len() <= 64);
+                }
+                Ok(None) => {}
+                Err(CodecError::BodyTooLarge | CodecError::Invalid(_) | CodecError::Incomplete) => {}
+            }
+        });
+    }
 
     #[test]
     fn parse_simple_get() {
@@ -407,5 +452,175 @@ mod tests {
             decode_chunked_with_limit(data, Some(8)),
             Err(CodecError::BodyTooLarge)
         ));
+    }
+
+    /// Generate a valid HTTP method.
+    fn arb_method() -> impl Strategy<Value = &'static str> {
+        prop_oneof![
+            Just("GET"),
+            Just("POST"),
+            Just("PUT"),
+            Just("DELETE"),
+            Just("PATCH"),
+            Just("HEAD"),
+            Just("OPTIONS"),
+        ]
+    }
+
+    /// Generate a valid URI path.
+    fn arb_path() -> impl Strategy<Value = String> {
+        prop::collection::vec("[a-zA-Z0-9._~-]{1,20}", 1..=5)
+            .prop_map(|segs| format!("/{}", segs.join("/")))
+    }
+
+    /// Generate a valid header name (lowercase alpha + hyphens).
+    fn arb_header_name() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9-]{0,19}".prop_filter("no empty", |s| !s.is_empty())
+    }
+
+    /// Generate a valid header value (visible ASCII, no CR/LF).
+    fn arb_header_value() -> impl Strategy<Value = String> {
+        "[!-~]{1,50}"
+    }
+
+    proptest! {
+        /// Valid HTTP requests always parse successfully and round-trip method/path.
+        #[test]
+        fn proptest_valid_request_parses(
+            method in arb_method(),
+            path in arb_path(),
+            headers in prop::collection::vec(
+                (arb_header_name(), arb_header_value()),
+                0..=8
+            ),
+        ) {
+            let mut raw = format!("{method} {path} HTTP/1.1\r\nhost: localhost\r\n");
+            for (name, value) in &headers {
+                // Skip headers that conflict with codec logic.
+                if ["content-length", "transfer-encoding", "connection", "expect"]
+                    .contains(&name.as_str())
+                {
+                    continue;
+                }
+                raw.push_str(&format!("{name}: {value}\r\n"));
+            }
+            raw.push_str("\r\n");
+
+            let parsed = try_parse_request(raw.as_bytes()).unwrap();
+            prop_assert_eq!(parsed.method.as_str(), method);
+            prop_assert_eq!(parsed.uri.path(), path.as_str());
+            prop_assert_eq!(parsed.version, Version::HTTP_11);
+            prop_assert_eq!(parsed.header_len, raw.len());
+        }
+
+        /// Truncated requests always return Incomplete, never panic.
+        #[test]
+        fn proptest_truncated_never_panics(
+            method in arb_method(),
+            path in arb_path(),
+            cut in 1usize..100,
+        ) {
+            let raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            let truncated = &raw.as_bytes()[..cut.min(raw.len() - 1)];
+            match try_parse_request(truncated) {
+                Err(CodecError::Incomplete) => {} // expected
+                Err(CodecError::Invalid(_)) => {} // also acceptable for badly cut data
+                Ok(_) => {} // subset might be a valid request on its own
+                Err(CodecError::BodyTooLarge) => {
+                    panic!("BodyTooLarge from header parsing is unexpected");
+                }
+            }
+        }
+
+        /// Arbitrary bytes never panic the parser.
+        #[test]
+        fn proptest_arbitrary_bytes_never_panic(data in prop::collection::vec(any::<u8>(), 0..=1024)) {
+            let _ = try_parse_request(&data);
+        }
+
+        /// Chunked encode/decode round-trips for arbitrary data.
+        #[test]
+        fn proptest_chunked_roundtrip(chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..=256), 1..=4)) {
+            let mut encoded = Vec::new();
+            let mut expected = Vec::new();
+            for chunk in &chunks {
+                encoded.extend_from_slice(&encode_chunk(chunk));
+                expected.extend_from_slice(chunk);
+            }
+            encoded.extend_from_slice(CHUNK_TERMINATOR);
+
+            let (decoded, consumed) = decode_chunked_with_limit(&encoded, None)
+                .unwrap()
+                .unwrap();
+            prop_assert_eq!(decoded.as_ref(), expected.as_slice());
+            prop_assert_eq!(consumed, encoded.len());
+        }
+
+        /// Chunked body limit is enforced: decoded body exceeding limit returns BodyTooLarge.
+        #[test]
+        fn proptest_chunked_limit_enforced(
+            data in prop::collection::vec(any::<u8>(), 10..=200),
+            limit in 1usize..=9,
+        ) {
+            let mut encoded = encode_chunk(&data);
+            encoded.extend_from_slice(CHUNK_TERMINATOR);
+
+            match decode_chunked_with_limit(&encoded, Some(limit)) {
+                Err(CodecError::BodyTooLarge) => {} // expected
+                other => prop_assert!(false, "expected BodyTooLarge, got {:?}", other.map(|o| o.map(|(b, c)| (b.len(), c)))),
+            }
+        }
+
+        /// HTTP/1.0 defaults to close, HTTP/1.1 defaults to keep-alive.
+        #[test]
+        fn proptest_keep_alive_version_default(version in prop_oneof![Just(0u8), Just(1u8)]) {
+            let raw = format!(
+                "GET / HTTP/1.{version}\r\nHost: localhost\r\n\r\n"
+            );
+            let parsed = try_parse_request(raw.as_bytes()).unwrap();
+            if version == 1 {
+                prop_assert!(parsed.keep_alive);
+            } else {
+                prop_assert!(!parsed.keep_alive);
+            }
+        }
+
+        /// Connection: close always disables keep-alive regardless of version.
+        #[test]
+        fn proptest_connection_close_overrides(version in prop_oneof![Just(0u8), Just(1u8)]) {
+            let raw = format!(
+                "GET / HTTP/1.{version}\r\nConnection: close\r\n\r\n"
+            );
+            let parsed = try_parse_request(raw.as_bytes()).unwrap();
+            prop_assert!(!parsed.keep_alive);
+        }
+
+        /// Response head always starts with "HTTP/1.1 {status}" and ends with "\r\n".
+        #[test]
+        fn proptest_response_head_format(
+            status_code in 200u16..=599,
+            n_headers in 0usize..=5,
+            chunked in any::<bool>(),
+        ) {
+            let status = http::StatusCode::from_u16(status_code).unwrap();
+            let mut headers = HeaderMap::new();
+            for i in 0..n_headers {
+                let name: http::header::HeaderName = format!("x-test-{i}").parse().unwrap();
+                headers.insert(name, "value".parse().unwrap());
+            }
+            let head = write_response_head(status, &headers, chunked);
+            let head_str = std::str::from_utf8(&head).unwrap();
+
+            let expected_start = format!("HTTP/1.1 {}", status.as_str());
+            prop_assert!(head_str.starts_with(&expected_start));
+            prop_assert!(head_str.ends_with("\r\n"));
+            if chunked {
+                prop_assert!(head_str.contains("transfer-encoding: chunked\r\n"));
+            }
+            for i in 0..n_headers {
+                let expected_hdr = format!("x-test-{}: value\r\n", i);
+                prop_assert!(head_str.contains(&expected_hdr));
+            }
+        }
     }
 }
