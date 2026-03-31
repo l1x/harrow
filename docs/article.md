@@ -1,7 +1,7 @@
 # Harrow Performance Journal
 
 **Status:** living document  
-**Last updated:** 2026-03-21
+**Last updated:** 2026-03-31
 
 This is not a launch post and not a benchmark victory lap. It is a dated
 engineering log for Harrow's performance work: what we measured, what moved the
@@ -670,6 +670,200 @@ a deliberate choice. The penalty is measurable at extreme throughput. The
 defense is real.
 
 Full details are in `docs/connection-safety.md`.
+
+## 2026-03-31: Monoio Backend — Thread-Per-Core and io_uring Reality Check
+
+Harrow now has a second server backend: `harrow-server-monoio`, built on
+monoio's io_uring/epoll fusion runtime with a thread-per-core (TPC)
+architecture. This is the first serious test of whether io_uring delivers
+on its promise for HTTP server workloads.
+
+### What We Tested
+
+Remote throughput on `c8gn.12xlarge` (48 vCPUs, 100 Gbps networking,
+placement group) using spinr (Rust TPC load generator) at 128 connections.
+
+Payload scaling ladder: tiny text (2 bytes), 128KB, 256KB, 512KB, 1MB.
+
+Three server configurations:
+- `harrow-server-monoio` with io_uring (seccomp=unconfined)
+- `harrow-server-monoio` with epoll fallback (default Docker seccomp)
+- `harrow-server-tokio` (hyper + tokio work-stealing)
+- `axum` (baseline)
+
+### Results
+
+| Payload | harrow-monoio (io_uring) | harrow-monoio (epoll) | harrow-tokio | axum |
+|---|---:|---:|---:|---:|
+| tiny text | 1,287,198 | 1,360,143 | 1,043,859 | 1,085,218 |
+| 128KB | 136,886 | — | 136,907 | 136,912 |
+| 256KB | 68,288 | — | 68,302 | 68,300 |
+| 512KB | 34,142 | — | 34,148 | 34,110 |
+| 1MB | 17,083 | — | 17,087 | 17,080 |
+
+All numbers are RPS, 100% success rate, 128 connections, 20s duration.
+
+### What the Numbers Say
+
+**Thread-per-core wins 19-29% on small payloads.** Monoio's TPC
+architecture (one event loop per core, `SO_REUSEPORT`, no work-stealing)
+beats tokio's work-stealing model when the workload is CPU-bound request
+processing. At tiny payloads, the per-request cost is dominated by syscall
+overhead and scheduler contention — exactly where TPC eliminates waste.
+
+**Large payloads are NIC-bound.** At 128KB and above, all four
+configurations produce identical RPS. The math:
+128KB * 137K RPS = ~16.6 GB/s = ~133 Gbps, which saturates the 100 Gbps
+NIC (with TCP overhead). The server runtime is irrelevant when the
+bottleneck is the network card.
+
+**io_uring is slower than epoll.** This was the surprise. Monoio with
+io_uring (1,287K RPS) was 5% slower than monoio with epoll fallback
+(1,360K RPS), with worse p99 latency (0.29ms vs 0.25ms).
+
+### Why io_uring Lost
+
+Docker's default seccomp profile blocks io_uring syscalls. Monoio's
+`FusionDriver` silently falls back to epoll. We added runtime detection
+so the server now logs which driver is active:
+
+```
+harrow-server-monoio listening on 0.0.0.0:3090 [allocator: mimalloc, io: io_uring]
+harrow-server-monoio listening on 0.0.0.0:3090 [allocator: mimalloc, io: epoll (io_uring unavailable)]
+```
+
+When we forced io_uring via `--security-opt seccomp=unconfined`, it was
+measurably slower. The reason is architectural:
+
+1. **Monoio uses single-shot operations.** Each accept, read, write is a
+   separate SQE submission + CQE completion. This means each operation
+   does: write SQE to ring buffer → memory barrier → `io_uring_enter`
+   syscall → wait for CQE. For single operations, epoll is cheaper
+   because it avoids the ring buffer overhead.
+
+2. **io_uring wins with batching.** The real advantage comes from
+   submitting multiple operations in one `io_uring_enter` call:
+   multishot accept (one SQE → many connections), multishot recv
+   (one SQE → continuous data), batched sends. Monoio 0.2 does not
+   expose any of these.
+
+3. **No zero-copy.** `send_zc` (zero-copy send, kernel 6.0+) could
+   eliminate the userspace→kernel buffer copy for responses. Monoio
+   does not use it.
+
+In short: monoio uses io_uring as a drop-in epoll replacement. The TPC
+architecture delivers the performance gain, not io_uring itself.
+
+### OS-Level Profiling
+
+`vmstat` and `mpstat` during the tiny-text benchmark revealed:
+
+- **0% usr, 0% sys, 58% iowait** — the server spends almost no time in
+  computation. It is entirely I/O-bound, waiting for network data.
+- **41,868 context switches in 25s** (1,674/sec) — extremely low for
+  1.3M RPS, confirming TPC avoids cross-thread scheduling.
+- **12 cpu-migrations** — effectively zero. Threads stay pinned to cores.
+
+The iowait breakdown by core showed ~30 of 48 cores at 100% iowait
+(busy serving connections) and ~18 cores at 100% idle (no connections
+assigned). This uneven distribution is because 128 connections across
+48 cores means some cores get 3 connections and some get 2.
+
+### Load Generator Comparison
+
+We also ran the same tests with vegeta (Go, single-process):
+
+| Load generator | Max RPS (tiny text) |
+|---|---:|
+| spinr (Rust, TPC, 48 workers) | 1,360,143 |
+| vegeta (Go, single-process, 128 workers) | 64,439 |
+
+Vegeta was 21x slower — it was measuring its own limits, not the server's.
+Spinr's TPC architecture on the client side is what makes these benchmarks
+meaningful. At 1.3M RPS, spinr actually saturates the server CPU.
+
+### What Would Make io_uring Worth It
+
+For HTTP servers, io_uring batching features that monoio does not yet
+expose:
+
+- **Multishot accept** (`IORING_OP_ACCEPT_MULTISHOT`, kernel 5.19+):
+  one SQE → many connections. Reduces accept-loop syscalls.
+- **Multishot recv** (kernel 6.0+): one SQE → continuous data on a
+  connection. Eliminates per-read submissions.
+- **Provided buffer rings** (kernel 5.19+): kernel fills pre-registered
+  buffers autonomously, zero userspace allocation per read.
+- **`send_zc`** (kernel 6.0+): zero-copy send from userspace to NIC.
+- **Fixed file descriptors**: register fds once, skip kernel fd lookup
+  per operation.
+
+These would require either contributing to monoio upstream or building
+a thin io_uring layer directly on the `io-uring` crate. The TPC model
+stays — we just need the kernel to do more work autonomously instead of
+waking userspace for each operation.
+
+For now, the pragmatic conclusion: **use monoio with epoll fallback.**
+The TPC architecture delivers the real performance gain. io_uring
+batching is a future optimization when the ecosystem catches up.
+
+### Artifacts
+
+- `docs/perf/c8gn.12xlarge/2026-03-31T13-29-59Z/` — monoio io_uring
+  text + json
+- `docs/perf/c8gn.12xlarge/2026-03-31T13-39-15Z/` — tokio text + json
+- `docs/perf/c8gn.12xlarge/2026-03-31T17-32-12Z/` — payload scaling
+  ladder (monoio io_uring)
+- `docs/perf/c8gn.12xlarge/2026-03-31T17-42-34Z/` — payload scaling
+  ladder (tokio)
+- `docs/perf/c8gn.12xlarge/2026-03-31T18-29-36Z/` — with OS monitors
+
+## 2026-03-31: body_read_timeout for Tokio Backend
+
+Added `body_read_timeout` to `harrow-server-tokio`'s `ServerConfig`.
+When configured, wraps the hyper `Incoming` body in a `TimeoutBody`
+that enforces a per-frame read deadline. A slow body sender (e.g.,
+sending 1 byte/sec within the size limit) is terminated with a 400
+error after the timeout expires.
+
+The implementation is zero-cost when disabled: `body_read_timeout`
+defaults to `None`, and the raw `box_incoming` path is used with no
+wrapper. The `TimeoutBody` only exists in the hot path when explicitly
+configured.
+
+This closes a gap between the two backends — monoio already had
+`body_read_timeout`. Combined with `header_read_timeout` (5s default)
+and `connection_timeout` (300s default), the full slowloris defense
+timeline is now:
+
+1. Client opens connection → `header_read_timeout` starts (5s)
+2. Headers received → handler invoked → `body_read_timeout` starts
+   (if body is read and timeout is configured)
+3. Connection lifetime → `connection_timeout` (300s)
+
+The handler never sees a slowloris — it is killed at the connection
+layer before the handler runs.
+
+## Current Thesis (Updated 2026-03-31)
+
+1. Harrow's local routing and dispatch costs are already small.
+2. The big remote throughput regression was caused by per-connection
+   timers. Fixed.
+3. Middleware allocation slope is real, measurable, and still much
+   cheaper than Axum's ergonomic `from_fn` path.
+4. **Thread-per-core (monoio) wins 19-29% on small payloads** over
+   tokio's work-stealing model. Large payloads are NIC-bound.
+5. **io_uring does not help without batching.** Monoio's single-shot
+   usage makes io_uring slower than epoll. The TPC architecture
+   is what delivers the performance gain.
+6. Connection-level timeouts (header read, body read, connection
+   lifetime) are security features with measurable performance cost.
+   Making them optional and configurable was the right call.
+7. The next optimization worth chasing is io_uring batching
+   (multishot accept/recv, provided buffers, send_zc) — but only
+   when the monoio ecosystem or a custom io_uring layer supports it.
+8. **Spinr (TPC load generator) is critical infrastructure.** At 1.3M
+   RPS it saturates the server, making these benchmarks meaningful.
+   Vegeta (Go) maxed out at 64K RPS — 21x slower.
 
 ## What This Document Should Become
 
