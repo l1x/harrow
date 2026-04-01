@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use harrow::o11y::O11yConfig;
-use harrow::{App, AppO11yExt, Request, Response, timeout_middleware};
+use harrow::{App, AppO11yExt, Request, Response};
 
 async fn hello(_req: Request) -> Response {
     Response::text("hello, world")
@@ -25,7 +23,6 @@ async fn main() {
             otlp_traces_endpoint: option_env!("OTLP_ENDPOINT").map(String::from),
             ..O11yConfig::default()
         })
-        .middleware(timeout_middleware(Duration::from_secs(30)))
         .get("/", hello)
         .get("/greet/:name", greet)
         .group("/api", |g| g.get("/health", health));

@@ -10,7 +10,6 @@ use tower_http::cors::CorsLayer;
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
-use tower_http::timeout::TimeoutLayer;
 
 use harrow::App;
 use harrow_bench::{BenchClient, run_concurrent_with_headers, start_server};
@@ -73,51 +72,6 @@ const BENCH_HEADERS: &[(&str, &str)] = &[
 fn bench_middleware_individual(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("middleware_individual");
-
-    // --- Timeout ---
-
-    let harrow_client = {
-        let addr = rt.block_on(async {
-            let app = App::new()
-                .middleware(harrow::timeout_middleware(Duration::from_secs(5)))
-                .get("/echo", harrow_text_handler);
-            start_server(app).await
-        });
-        Arc::new(Mutex::new(rt.block_on(BenchClient::connect(addr))))
-    };
-    group.bench_function("timeout/harrow", |b| {
-        let client = Arc::clone(&harrow_client);
-        b.to_async(&rt).iter(|| {
-            let client = Arc::clone(&client);
-            async move {
-                let (status, _) = client.lock().await.get("/echo").await;
-                debug_assert_eq!(status, 200);
-            }
-        })
-    });
-
-    let axum_client = {
-        let addr = rt.block_on(async {
-            let app = Router::new().route("/echo", get(axum_text_handler)).layer(
-                TimeoutLayer::with_status_code(
-                    http::StatusCode::REQUEST_TIMEOUT,
-                    Duration::from_secs(5),
-                ),
-            );
-            start_axum_server(app).await
-        });
-        Arc::new(Mutex::new(rt.block_on(BenchClient::connect(addr))))
-    };
-    group.bench_function("timeout/axum", |b| {
-        let client = Arc::clone(&axum_client);
-        b.to_async(&rt).iter(|| {
-            let client = Arc::clone(&client);
-            async move {
-                let (status, _) = client.lock().await.get("/echo").await;
-                debug_assert_eq!(status, 200);
-            }
-        })
-    });
 
     // --- Request ID ---
 
@@ -273,11 +227,10 @@ fn bench_middleware_full_stack(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("middleware_full_stack");
 
-    // Harrow: timeout → request_id → cors → compression
+    // Harrow: request_id → cors → compression
     let harrow_client = {
         let addr = rt.block_on(async {
             let app = App::new()
-                .middleware(harrow::timeout_middleware(Duration::from_secs(5)))
                 .middleware(harrow::request_id_middleware)
                 .middleware(harrow::cors_middleware(harrow::CorsConfig::default()))
                 .middleware(harrow::compression_middleware)
@@ -301,7 +254,7 @@ fn bench_middleware_full_stack(c: &mut Criterion) {
         })
     });
 
-    // Axum: TimeoutLayer → SetRequestId+Propagate → CorsLayer → CompressionLayer
+    // Axum: SetRequestId+Propagate → CorsLayer → CompressionLayer
     let axum_client = {
         let addr = rt.block_on(async {
             let app = Router::new()
@@ -309,11 +262,7 @@ fn bench_middleware_full_stack(c: &mut Criterion) {
                 .layer(CompressionLayer::new())
                 .layer(CorsLayer::permissive())
                 .layer(PropagateRequestIdLayer::x_request_id())
-                .layer(SetRequestIdLayer::x_request_id(UuidRequestId))
-                .layer(TimeoutLayer::with_status_code(
-                    http::StatusCode::REQUEST_TIMEOUT,
-                    Duration::from_secs(5),
-                ));
+                .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
             start_axum_server(app).await
         });
         Arc::new(Mutex::new(rt.block_on(BenchClient::connect(addr))))
@@ -353,7 +302,6 @@ fn bench_middleware_concurrent(c: &mut Criterion) {
     // Harrow full stack server
     let harrow_addr = rt.block_on(async {
         let app = App::new()
-            .middleware(harrow::timeout_middleware(Duration::from_secs(5)))
             .middleware(harrow::request_id_middleware)
             .middleware(harrow::cors_middleware(harrow::CorsConfig::default()))
             .middleware(harrow::compression_middleware)
@@ -368,11 +316,7 @@ fn bench_middleware_concurrent(c: &mut Criterion) {
             .layer(CompressionLayer::new())
             .layer(CorsLayer::permissive())
             .layer(PropagateRequestIdLayer::x_request_id())
-            .layer(SetRequestIdLayer::x_request_id(UuidRequestId))
-            .layer(TimeoutLayer::with_status_code(
-                http::StatusCode::REQUEST_TIMEOUT,
-                Duration::from_secs(5),
-            ));
+            .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
         start_axum_server(app).await
     });
 

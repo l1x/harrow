@@ -22,7 +22,6 @@ tls = ["harrow-server-tokio/tls"]
 profiling = ["harrow-core/profiling", "harrow-server-tokio?/profiling"]
 
 # Middleware features — each pulls in harrow-middleware with the right feature
-timeout = ["dep:harrow-middleware", "harrow-middleware/timeout"]
 request-id = ["dep:harrow-middleware", "harrow-middleware/request-id"]
 cors = ["dep:harrow-middleware", "harrow-middleware/cors"]
 o11y = ["dep:harrow-middleware", "harrow-middleware/o11y", "dep:harrow-o11y", "dep:rolly"]
@@ -52,7 +51,7 @@ http = { workspace = true }
 
 [[example]]
 name = "hello"
-required-features = ["tokio", "o11y", "timeout", "json"]
+required-features = ["tokio", "o11y", "json"]
 
 [[example]]
 name = "monoio_hello"
@@ -60,7 +59,7 @@ required-features = ["monoio", "json"]
 
 [[example]]
 name = "vegeta_target_tokio"
-required-features = ["tokio", "timeout", "request-id", "cors", "session", "json"]
+required-features = ["tokio", "request-id", "cors", "session", "json"]
 
 [[example]]
 name = "vegeta_target_monoio"

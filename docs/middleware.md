@@ -207,7 +207,6 @@ This is the most important issue for Harrow.
 
 Several Harrow middleware features currently depend directly on Tokio:
 
-- `timeout`
 - `rate-limit`
 - `session`
 
@@ -216,7 +215,6 @@ That is visible in `harrow-middleware/Cargo.toml`, where those features pull in
 
 The reason is concrete, not theoretical:
 
-- `timeout_middleware` uses `tokio::time::timeout(...)`
 - `InMemorySessionStore::start_sweeper(...)` uses `tokio::spawn(...)` and
   `tokio::time::sleep(...)`
 - `InMemoryBackend::start_sweeper(...)` in rate limiting does the same
@@ -605,7 +603,6 @@ assumptions back into its "portable" middleware story.
 
 Harrow's shipped middleware modules are currently:
 
-- `timeout`
 - `request-id`
 - `cors`
 - `o11y`

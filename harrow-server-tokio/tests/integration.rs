@@ -15,7 +15,6 @@ use harrow_middleware::rate_limit::{HeaderKeyExtractor, InMemoryBackend, rate_li
 use harrow_middleware::session::{
     InMemorySessionStore, Session, SessionConfig, session_middleware,
 };
-use harrow_middleware::timeout::timeout_middleware;
 use harrow_o11y::O11yConfig;
 use http::StatusCode;
 
@@ -557,29 +556,6 @@ async fn slow_handler(_req: Request) -> Response {
     Response::text("slow")
 }
 
-#[tokio::test]
-async fn client_timeout_middleware_returns_408_on_slow_handler() {
-    let client = App::new()
-        .middleware(timeout_middleware(Duration::from_millis(50)))
-        .get("/slow", slow_handler)
-        .client();
-
-    let resp = client.get("/slow").await;
-    assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
-    assert_eq!(resp.text(), "request timeout");
-}
-
-#[tokio::test]
-async fn client_timeout_middleware_passes_fast_handler() {
-    let client = App::new()
-        .middleware(timeout_middleware(Duration::from_secs(1)))
-        .get("/hello", hello)
-        .client();
-
-    let resp = client.get("/hello").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.text(), "hello");
-}
 
 // -- Body Limit Middleware (Client) -------------------------------------------
 

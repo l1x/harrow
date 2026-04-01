@@ -4,11 +4,11 @@
 //! - All HTTP methods (GET, POST, PUT, PATCH, DELETE)
 //! - Path parameters
 //! - JSON/text responses with compression
-//! - Middleware chain (timeout, request-id, CORS, compression)
+//! - Middleware chain (request-id, CORS, session)
 //! - Health/liveness/readiness probes
 //! - Error responses (404, 405)
 //!
-//! Run with: cargo run --example vegeta_target_tokio --features tokio,timeout,request-id,cors,compression,json
+//! Run with: cargo run --example vegeta_target_tokio --features tokio,request-id,cors,session,json
 
 mod common;
 
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use harrow::{
     App, InMemorySessionStore, Request, Response, SameSite, Session, SessionConfig,
-    cors_middleware, request_id_middleware, session_middleware, timeout_middleware,
+    cors_middleware, request_id_middleware, session_middleware,
 };
 
 async fn root(_req: Request) -> Response {
@@ -68,11 +68,6 @@ async fn compression_test(_req: Request) -> Response {
 
 async fn compression_json(_req: Request) -> Response {
     Response::text(COMPRESSION_JSON.as_str()).header("content-type", "application/json")
-}
-
-async fn slow_handler(_req: Request) -> Response {
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    Response::text("this should time out")
 }
 
 async fn middleware_test(req: Request) -> Response {
@@ -142,7 +137,6 @@ async fn main() {
         .middleware(request_id_middleware)
         .middleware(cors_middleware(Default::default()))
         .middleware(session_middleware(session_store, session_config))
-        .middleware(timeout_middleware(Duration::from_secs(5)))
         .get("/", root)
         .get("/users/:id", common::get_user)
         .post("/users", common::create_user)
@@ -161,7 +155,6 @@ async fn main() {
         .get("/session", session_get)
         .post("/session/increment", session_increment)
         .delete("/session", session_destroy)
-        .get("/slow", slow_handler)
         .get("/cpu", common::cpu_intensive);
 
     tracing::info!("Tokio server starting on http://{}", addr);

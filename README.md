@@ -7,7 +7,7 @@ A thin, macro-free HTTP framework over Hyper with opt-in observability.
 - **No macros, no magic** -- handlers are plain `async fn(Request) -> Response` functions. No extractors, no trait bounds, no `#[debug_handler]`.
 - **Route introspection** -- the route table is a first-class data structure you can enumerate at startup for OpenAPI generation, health checks, or monitoring config.
 - **Opt-in observability** -- structured logging, OTLP trace export, and request-id propagation are wired in with one call, powered by [rolly](https://github.com/l1x/rolly).
-- **Feature-gated middleware** -- timeout, request-id, CORS, catch-panic, compression, and o11y are opt-in via Cargo features. Nothing compiles unless you ask for it.
+- **Feature-gated middleware** -- request-id, CORS, catch-panic, compression, session, rate-limit, and o11y are opt-in via Cargo features. Nothing compiles unless you ask for it.
 - **Fast** -- built directly on Hyper 1.x and matchit routing. No Tower, no `BoxCloneService`, no deep type nesting.
 - **Pluggable server backends** -- choose between Tokio/Hyper (cross-platform) or Monoio/io_uring (Linux high-performance).
 
@@ -38,7 +38,7 @@ Harrow requires you to explicitly select an HTTP server backend. There is no def
 ```toml
 # Tokio backend (cross-platform)
 [dependencies]
-harrow = { version = "0.7", features = ["tokio", "timeout", "json"] }
+harrow = { version = "0.8", features = ["tokio", "json"] }
 tokio = { version = "1", features = ["full"] }  # Required for #[tokio::main] and tokio APIs
 
 # io_uring backend (Linux 6.1+ only)
@@ -65,13 +65,12 @@ See [`examples/monoio_hello.rs`](harrow/examples/monoio_hello.rs) for a complete
 
 ```toml
 [dependencies]
-harrow = { version = "0.7", features = ["tokio", "timeout"] }
+harrow = { version = "0.8", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }  # Required for #[tokio::main]
 ```
 
 ```rust
-use std::time::Duration;
-use harrow::{App, Request, Response, timeout_middleware};
+use harrow::{App, Request, Response};
 
 async fn hello(_req: Request) -> Response {
     Response::text("hello, world")
@@ -85,7 +84,6 @@ async fn greet(req: Request) -> Response {
 #[tokio::main]
 async fn main() {
     let app = App::new()
-        .middleware(timeout_middleware(Duration::from_secs(30)))
         .health("/health")
         .get("/", hello)
         .get("/greet/:name", greet)

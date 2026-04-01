@@ -178,7 +178,6 @@ Target state:
 
 Current examples:
 
-- `timeout_middleware` uses `tokio::time::timeout`
 - `InMemorySessionStore::start_sweeper` uses `tokio::spawn` and
   `tokio::time::sleep`
 - `InMemoryBackend::start_sweeper` uses `tokio::spawn` and
@@ -402,16 +401,10 @@ Plan:
 
 ### `timeout`
 
-Plan:
-
-- re-evaluate whether it belongs in `harrow-middleware` at all
-- do not treat Tokio-based request timeout as portable middleware
-- prefer server/backend ownership of deadline policy
-
-Open question:
-
-- whether Harrow wants a backend-specific handler deadline helper in addition to
-  connection/body/header server timeouts
+**Resolved:** removed from `harrow-middleware`. Connection-level timeouts
+(header_read_timeout, body_read_timeout, connection_timeout) live in
+`ServerConfig` on both backends. Per-route handler timeouts are application
+code — users wrap their handler in `tokio::time::timeout` directly.
 
 ### `rate-limit`
 
@@ -468,7 +461,7 @@ Scope:
 
 - classify all shipped middleware into the four categories
 - audit `harrow-middleware` for direct Tokio coupling
-- decide `timeout` ownership
+- ~~decide `timeout` ownership~~ (done: removed from harrow-middleware)
 - remove or isolate Tokio sweepers from `rate-limit` and `session`
 
 Deliverables:
@@ -528,8 +521,7 @@ This plan does **not** propose:
 
 1. Should route-local middleware be added at the `Route` type, builder methods,
    or a new matched-route scope API?
-2. Should `timeout` be removed from `harrow-middleware`, deprecated, or moved
-   behind backend-specific modules?
+2. ~~Should `timeout` be removed from `harrow-middleware`?~~ (done: removed)
 3. Do we need a small pre-routing phase for things like path normalization, or
    should that stay out of scope?
 ## Recommended Next Step

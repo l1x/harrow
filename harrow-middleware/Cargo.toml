@@ -8,7 +8,6 @@ description = "Feature-gated middleware collection for Harrow"
 
 [features]
 default = []
-timeout = ["dep:tokio"]
 request-id = []
 cors = []
 o11y = ["dep:tracing", "dep:rolly", "dep:harrow-o11y", "dep:blake3"]

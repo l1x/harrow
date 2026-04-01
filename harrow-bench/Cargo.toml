@@ -10,7 +10,7 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-harrow = { path = "../harrow", features = ["tokio", "monoio", "json", "msgpack", "timeout", "request-id", "cors", "compression", "compression-br", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
+harrow = { path = "../harrow", features = ["tokio", "monoio", "json", "msgpack", "request-id", "cors", "compression", "compression-br", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
 harrow-core = { workspace = true, features = ["json", "msgpack"] }
 harrow-o11y = { workspace = true }
 axum = { workspace = true }

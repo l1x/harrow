@@ -95,9 +95,6 @@ pub mod runtime {
     }
 }
 
-#[cfg(feature = "timeout")]
-pub use harrow_middleware::timeout::timeout_middleware;
-
 #[cfg(feature = "request-id")]
 pub use harrow_middleware::request_id::{request_id_middleware, request_id_middleware_with_header};
 

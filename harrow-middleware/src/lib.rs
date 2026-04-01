@@ -1,6 +1,3 @@
-#[cfg(feature = "timeout")]
-pub mod timeout;
-
 #[cfg(feature = "request-id")]
 pub mod request_id;
 

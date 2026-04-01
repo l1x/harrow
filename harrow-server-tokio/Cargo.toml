@@ -29,7 +29,7 @@ rustls = { version = "0.23", optional = true }
 
 [dev-dependencies]
 harrow-core = { workspace = true }
-harrow-middleware = { workspace = true, features = ["timeout", "o11y", "body-limit", "rate-limit", "session", "catch-panic"] }
+harrow-middleware = { workspace = true, features = ["o11y", "body-limit", "rate-limit", "session", "catch-panic"] }
 harrow-o11y = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
