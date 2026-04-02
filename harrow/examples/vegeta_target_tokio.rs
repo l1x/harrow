@@ -12,13 +12,58 @@
 
 mod common;
 
-use std::sync::LazyLock;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
+use std::time::{Duration, Instant};
 
 use harrow::{
-    App, InMemorySessionStore, Request, Response, SameSite, Session, SessionConfig,
-    cors_middleware, request_id_middleware, session_middleware,
+    App, Request, Response, SameSite, Session, SessionConfig, SessionStore, cors_middleware,
+    request_id_middleware, session_middleware,
 };
+
+struct SessionEntry {
+    data: HashMap<String, String>,
+    expires_at: Instant,
+}
+
+struct InMemorySessionStore {
+    sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
+}
+
+impl InMemorySessionStore {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl SessionStore for InMemorySessionStore {
+    async fn load(&self, id: &str) -> Option<HashMap<String, String>> {
+        let sessions = self.sessions.read().unwrap();
+        let entry = sessions.get(id)?;
+        if entry.expires_at <= Instant::now() {
+            return None;
+        }
+        Some(entry.data.clone())
+    }
+
+    async fn save(&self, id: &str, data: &HashMap<String, String>, ttl: Duration) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.insert(
+            id.to_string(),
+            SessionEntry {
+                data: data.clone(),
+                expires_at: Instant::now() + ttl,
+            },
+        );
+    }
+
+    async fn remove(&self, id: &str) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.remove(id);
+    }
+}
 
 async fn root(_req: Request) -> Response {
     Response::text("hello, world")

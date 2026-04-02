@@ -18,7 +18,7 @@ fn bench_rate_limit(c: &mut Criterion) {
 
     // rate_limit only (high limit so requests always pass)
     let rate_limit_addr = rt.block_on(async {
-        let backend = harrow::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
+        let backend = harrow_bench::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
         let app = App::new()
             .middleware(harrow::rate_limit_middleware(
                 backend,
@@ -30,7 +30,7 @@ fn bench_rate_limit(c: &mut Criterion) {
 
     // rate_limit + noop middleware
     let stack_addr = rt.block_on(async {
-        let backend = harrow::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
+        let backend = harrow_bench::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
         let app = App::new()
             .middleware(harrow::rate_limit_middleware(
                 backend,
@@ -43,7 +43,7 @@ fn bench_rate_limit(c: &mut Criterion) {
 
     // rate_limit with no key header (skip path)
     let skip_addr = rt.block_on(async {
-        let backend = harrow::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
+        let backend = harrow_bench::InMemoryBackend::per_second(1_000_000).burst(1_000_000);
         let app = App::new()
             .middleware(harrow::rate_limit_middleware(
                 backend,

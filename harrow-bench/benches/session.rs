@@ -36,7 +36,7 @@ fn bench_session(c: &mut Criterion) {
 
     // session middleware active but handler does not access the session (pure middleware overhead)
     let noop_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         let config = bench_session_config();
         let app = App::new()
             .middleware(harrow::session_middleware(store, config))
@@ -46,7 +46,7 @@ fn bench_session(c: &mut Criterion) {
 
     // session new: handler sets data, no inbound cookie → getrandom + blake3 + DashMap insert
     let new_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         let config = bench_session_config();
         let app = App::new()
             .middleware(harrow::session_middleware(store, config))
@@ -56,7 +56,7 @@ fn bench_session(c: &mut Criterion) {
 
     // session read: valid cookie, handler reads only → blake3 verify + DashMap read, no Set-Cookie
     let read_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         seed_bench_session(&store).await;
         let config = bench_session_config();
         let app = App::new()
@@ -67,7 +67,7 @@ fn bench_session(c: &mut Criterion) {
 
     // session write: valid cookie, handler mutates → blake3 verify + DashMap read + write + Set-Cookie
     let write_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         seed_bench_session(&store).await;
         let config = bench_session_config();
         let app = App::new()
@@ -78,7 +78,7 @@ fn bench_session(c: &mut Criterion) {
 
     // session + noop middleware
     let stack_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         seed_bench_session(&store).await;
         let config = bench_session_config();
         let app = App::new()
@@ -96,7 +96,7 @@ fn bench_session(c: &mut Criterion) {
 
     // realistic stack: session + cors + compression, read-only
     let realistic_read_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         seed_bench_session(&store).await;
         let config = bench_session_config();
         let app = App::new()
@@ -109,7 +109,7 @@ fn bench_session(c: &mut Criterion) {
 
     // realistic stack: session + cors + compression, write path
     let realistic_write_addr = rt.block_on(async {
-        let store = harrow::InMemorySessionStore::new();
+        let store = harrow_bench::InMemorySessionStore::new();
         seed_bench_session(&store).await;
         let config = bench_session_config();
         let app = App::new()

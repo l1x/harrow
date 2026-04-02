@@ -859,7 +859,7 @@ fn main() {
         // session_new: no cookie, handler sets data
         let r = measure_tcp(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
                     App::new()
@@ -880,7 +880,7 @@ fn main() {
         // session_noop: no cookie, session inserted but never modified
         let r = measure_tcp(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
                     App::new()
@@ -902,7 +902,7 @@ fn main() {
         let cookie_for_read = bench_cookie.clone();
         let r = measure_tcp_with_headers(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 harrow_bench::seed_bench_session(&store).await;
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
@@ -926,7 +926,7 @@ fn main() {
         let cookie_for_write = bench_cookie.clone();
         let r = measure_tcp_with_headers(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 harrow_bench::seed_bench_session(&store).await;
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
@@ -950,7 +950,7 @@ fn main() {
         let cookie_for_noop = bench_cookie.clone();
         let r = measure_tcp_with_headers(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 harrow_bench::seed_bench_session(&store).await;
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
@@ -996,7 +996,7 @@ fn main() {
         let cookie_for_stack_read = bench_cookie.clone();
         let r = measure_tcp_with_headers(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 harrow_bench::seed_bench_session(&store).await;
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(
@@ -1026,7 +1026,7 @@ fn main() {
         let cookie_for_stack_write = bench_cookie.clone();
         let r = measure_tcp_with_headers(
             || async {
-                let store = harrow::InMemorySessionStore::new();
+                let store = harrow_bench::InMemorySessionStore::new();
                 harrow_bench::seed_bench_session(&store).await;
                 let config = harrow_bench::bench_session_config();
                 harrow_bench::start_server(

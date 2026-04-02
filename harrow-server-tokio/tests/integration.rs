@@ -11,10 +11,10 @@ extern crate http;
 use harrow_middleware::body_limit::body_limit_middleware;
 use harrow_middleware::catch_panic::catch_panic_middleware;
 use harrow_middleware::o11y::o11y_middleware;
-use harrow_middleware::rate_limit::{HeaderKeyExtractor, InMemoryBackend, rate_limit_middleware};
-use harrow_middleware::session::{
-    InMemorySessionStore, Session, SessionConfig, session_middleware,
+use harrow_middleware::rate_limit::{
+    HeaderKeyExtractor, RateLimitBackend, RateLimitOutcome, rate_limit_middleware,
 };
+use harrow_middleware::session::{Session, SessionConfig, SessionStore, session_middleware};
 use harrow_o11y::O11yConfig;
 use http::StatusCode;
 
@@ -26,6 +26,147 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 
 /// Shared counter used as application state.
 struct HitCounter(AtomicUsize);
+
+// ---------------------------------------------------------------------------
+// Test-only in-memory stores
+// ---------------------------------------------------------------------------
+
+use std::sync::RwLock;
+use std::time::Instant as StdInstant;
+
+struct SessionEntry {
+    data: std::collections::HashMap<String, String>,
+    expires_at: StdInstant,
+}
+
+struct InMemorySessionStore {
+    sessions: Arc<RwLock<std::collections::HashMap<String, SessionEntry>>>,
+}
+
+impl InMemorySessionStore {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+}
+
+impl SessionStore for InMemorySessionStore {
+    async fn load(&self, id: &str) -> Option<std::collections::HashMap<String, String>> {
+        let sessions = self.sessions.read().unwrap();
+        let entry = sessions.get(id)?;
+        if entry.expires_at <= StdInstant::now() {
+            return None;
+        }
+        Some(entry.data.clone())
+    }
+
+    async fn save(
+        &self,
+        id: &str,
+        data: &std::collections::HashMap<String, String>,
+        ttl: Duration,
+    ) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.insert(
+            id.to_string(),
+            SessionEntry {
+                data: data.clone(),
+                expires_at: StdInstant::now() + ttl,
+            },
+        );
+    }
+
+    async fn remove(&self, id: &str) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.remove(id);
+    }
+}
+
+use std::sync::LazyLock;
+use std::sync::atomic::AtomicU64;
+
+static EPOCH: LazyLock<StdInstant> = LazyLock::new(StdInstant::now);
+
+fn now_ns() -> u64 {
+    EPOCH.elapsed().as_nanos() as u64
+}
+
+struct InMemoryBackend {
+    states: Arc<dashmap::DashMap<String, AtomicU64>>,
+    t_ns: u64,
+    tau_ns: u64,
+    limit: u64,
+    burst: u64,
+}
+
+impl InMemoryBackend {
+    fn per_second(rate: u64) -> Self {
+        let t_ns = 1_000_000_000 / rate;
+        Self {
+            states: Arc::new(dashmap::DashMap::new()),
+            t_ns,
+            tau_ns: (rate - 1) * t_ns,
+            limit: rate,
+            burst: rate,
+        }
+    }
+
+    fn burst(mut self, burst: u64) -> Self {
+        self.burst = burst;
+        self.tau_ns = (burst - 1) * self.t_ns;
+        self
+    }
+
+    fn gcra_check(&self, tat: &AtomicU64, now: u64) -> RateLimitOutcome {
+        loop {
+            let old_tat = tat.load(Ordering::Relaxed);
+            let tat_val = if old_tat == 0 { now } else { old_tat };
+            if now < tat_val.saturating_sub(self.tau_ns) {
+                let retry_after_ns = tat_val.saturating_sub(self.tau_ns) - now;
+                let reset_after_ns = tat_val.saturating_sub(now);
+                return RateLimitOutcome {
+                    allowed: false,
+                    limit: self.limit,
+                    remaining: 0,
+                    reset_after_ns,
+                    retry_after_ns,
+                };
+            }
+            let new_tat = tat_val.max(now) + self.t_ns;
+            if tat
+                .compare_exchange_weak(old_tat, new_tat, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let max_tat = now + self.tau_ns + self.t_ns;
+                let remaining = max_tat.saturating_sub(new_tat) / self.t_ns;
+                let remaining = remaining.min(self.burst);
+                let reset_after_ns = new_tat.saturating_sub(now);
+                return RateLimitOutcome {
+                    allowed: true,
+                    limit: self.limit,
+                    remaining,
+                    reset_after_ns,
+                    retry_after_ns: 0,
+                };
+            }
+        }
+    }
+}
+
+impl RateLimitBackend for InMemoryBackend {
+    fn check(&self, key: &str) -> impl std::future::Future<Output = RateLimitOutcome> + Send {
+        let now = now_ns();
+        if let Some(entry) = self.states.get(key) {
+            return std::future::ready(self.gcra_check(entry.value(), now));
+        }
+        let entry = self
+            .states
+            .entry(key.to_string())
+            .or_insert_with(|| AtomicU64::new(0));
+        std::future::ready(self.gcra_check(entry.value(), now))
+    }
+}
 
 // -- Handlers ----------------------------------------------------------------
 

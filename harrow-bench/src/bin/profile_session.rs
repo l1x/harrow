@@ -85,7 +85,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             (addr, vec![])
         }
         "no-touch" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             let config = harrow_bench::bench_session_config();
             let app = App::new()
                 .middleware(harrow::session_middleware(store, config))
@@ -93,7 +93,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             (harrow_bench::start_server(app).await, vec![])
         }
         "new" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             let config = harrow_bench::bench_session_config();
             let app = App::new()
                 .middleware(harrow::session_middleware(store, config))
@@ -101,7 +101,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             (harrow_bench::start_server(app).await, vec![])
         }
         "read" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             harrow_bench::seed_bench_session(&store).await;
             let config = harrow_bench::bench_session_config();
             let app = App::new()
@@ -113,7 +113,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             )
         }
         "write" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             harrow_bench::seed_bench_session(&store).await;
             let config = harrow_bench::bench_session_config();
             let app = App::new()
@@ -125,7 +125,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             )
         }
         "stack-read" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             harrow_bench::seed_bench_session(&store).await;
             let config = harrow_bench::bench_session_config();
             let app = App::new()
@@ -146,7 +146,7 @@ async fn start_scenario(name: &str) -> (SocketAddr, HeaderList) {
             )
         }
         "stack-write" => {
-            let store = harrow::InMemorySessionStore::new();
+            let store = harrow_bench::InMemorySessionStore::new();
             harrow_bench::seed_bench_session(&store).await;
             let config = harrow_bench::bench_session_config();
             let app = App::new()

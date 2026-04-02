@@ -32,6 +32,7 @@ harrow-core = { workspace = true }
 harrow-middleware = { workspace = true, features = ["o11y", "body-limit", "rate-limit", "session", "catch-panic"] }
 harrow-o11y = { workspace = true }
 bytes = { workspace = true }
+dashmap = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client"] }
 hyper-util = { workspace = true }

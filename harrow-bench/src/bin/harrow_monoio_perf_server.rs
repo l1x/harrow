@@ -107,10 +107,10 @@ fn main() {
         .get("/health", health);
 
     if session {
-        use harrow::{InMemorySessionStore, session_middleware};
+        use harrow::session_middleware;
         use harrow_bench::{
-            bench_session_config, seed_bench_session, session_get_handler, session_noop_handler,
-            session_set_handler, session_write_handler,
+            InMemorySessionStore, bench_session_config, seed_bench_session, session_get_handler,
+            session_noop_handler, session_set_handler, session_write_handler,
         };
 
         let store = InMemorySessionStore::new();

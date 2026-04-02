@@ -114,14 +114,13 @@ pub use harrow_middleware::compression::compression_middleware;
 
 #[cfg(feature = "rate-limit")]
 pub use harrow_middleware::rate_limit::{
-    HeaderKeyExtractor, InMemoryBackend, KeyExtractor, RateLimitBackend, RateLimitHeaderStyle,
-    RateLimitMiddleware, RateLimitOutcome, rate_limit_middleware,
+    HeaderKeyExtractor, KeyExtractor, RateLimitBackend, RateLimitHeaderStyle, RateLimitMiddleware,
+    RateLimitOutcome, rate_limit_middleware,
 };
 
 #[cfg(feature = "session")]
 pub use harrow_middleware::session::{
-    InMemorySessionStore, SameSite, Session, SessionConfig, SessionMiddleware, SessionStore,
-    session_middleware,
+    SameSite, Session, SessionConfig, SessionMiddleware, SessionStore, session_middleware,
 };
 
 #[cfg(feature = "openapi")]

@@ -27,6 +27,7 @@ tower-http = { version = "0.6", features = ["compression-gzip", "compression-br"
 toml = "0.8"
 minijinja = "2.12"
 blake3 = { workspace = true }
+dashmap = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 
 [dev-dependencies]

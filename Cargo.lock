@@ -870,6 +870,7 @@ dependencies = [
  "blake3",
  "bytes",
  "criterion",
+ "dashmap",
  "futures-util",
  "harrow",
  "harrow-core",
@@ -920,7 +921,6 @@ dependencies = [
  "blake3",
  "brotli 7.0.0",
  "bytes",
- "dashmap",
  "flate2",
  "futures-util",
  "getrandom 0.3.4",
@@ -979,6 +979,7 @@ name = "harrow-server-tokio"
 version = "0.8.0"
 dependencies = [
  "bytes",
+ "dashmap",
  "futures-util",
  "harrow-core",
  "harrow-middleware",

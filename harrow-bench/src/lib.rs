@@ -620,3 +620,166 @@ pub fn build_app_with_routes(n: usize) -> App {
     app = app.get("/target/:id", text_handler);
     app
 }
+
+// ---------------------------------------------------------------------------
+// Test-only in-memory stores (not for production use)
+// ---------------------------------------------------------------------------
+
+use std::sync::RwLock;
+use std::time::Instant as StdInstant;
+
+struct SessionEntry {
+    data: HashMap<String, String>,
+    expires_at: StdInstant,
+}
+
+/// Simple in-memory session store for testing and benchmarks only.
+/// Not suitable for production — no sweeper, no size limit, single-node only.
+pub struct InMemorySessionStore {
+    sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
+}
+
+impl InMemorySessionStore {
+    pub fn new() -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for InMemorySessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl harrow::SessionStore for InMemorySessionStore {
+    async fn load(&self, id: &str) -> Option<HashMap<String, String>> {
+        let sessions = self.sessions.read().unwrap();
+        let entry = sessions.get(id)?;
+        if entry.expires_at <= StdInstant::now() {
+            return None;
+        }
+        Some(entry.data.clone())
+    }
+
+    async fn save(&self, id: &str, data: &HashMap<String, String>, ttl: Duration) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.insert(
+            id.to_string(),
+            SessionEntry {
+                data: data.clone(),
+                expires_at: StdInstant::now() + ttl,
+            },
+        );
+    }
+
+    async fn remove(&self, id: &str) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.remove(id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-memory GCRA rate-limit backend (not for production use)
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::AtomicU64;
+
+static EPOCH: LazyLock<StdInstant> = LazyLock::new(StdInstant::now);
+
+fn now_ns() -> u64 {
+    EPOCH.elapsed().as_nanos() as u64
+}
+
+/// In-memory GCRA rate-limit backend for testing and benchmarks only.
+/// Not suitable for production — no sweeper, no size limit, single-node only.
+pub struct InMemoryBackend {
+    states: Arc<dashmap::DashMap<String, AtomicU64>>,
+    t_ns: u64,
+    tau_ns: u64,
+    limit: u64,
+    burst: u64,
+}
+
+impl InMemoryBackend {
+    pub fn per_second(rate: u64) -> Self {
+        let t_ns = 1_000_000_000 / rate;
+        Self {
+            states: Arc::new(dashmap::DashMap::new()),
+            t_ns,
+            tau_ns: (rate - 1) * t_ns,
+            limit: rate,
+            burst: rate,
+        }
+    }
+
+    pub fn per_minute(rate: u64) -> Self {
+        let t_ns = 60_000_000_000 / rate;
+        Self {
+            states: Arc::new(dashmap::DashMap::new()),
+            t_ns,
+            tau_ns: (rate - 1) * t_ns,
+            limit: rate,
+            burst: rate,
+        }
+    }
+
+    pub fn burst(mut self, burst: u64) -> Self {
+        self.burst = burst;
+        self.tau_ns = (burst - 1) * self.t_ns;
+        self
+    }
+
+    fn gcra_check(&self, tat: &AtomicU64, now: u64) -> harrow::RateLimitOutcome {
+        loop {
+            let old_tat = tat.load(Ordering::Relaxed);
+            let tat_val = if old_tat == 0 { now } else { old_tat };
+            if now < tat_val.saturating_sub(self.tau_ns) {
+                let retry_after_ns = tat_val.saturating_sub(self.tau_ns) - now;
+                let reset_after_ns = tat_val.saturating_sub(now);
+                return harrow::RateLimitOutcome {
+                    allowed: false,
+                    limit: self.limit,
+                    remaining: 0,
+                    reset_after_ns,
+                    retry_after_ns,
+                };
+            }
+            let new_tat = tat_val.max(now) + self.t_ns;
+            if tat
+                .compare_exchange_weak(old_tat, new_tat, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let max_tat = now + self.tau_ns + self.t_ns;
+                let remaining = max_tat.saturating_sub(new_tat) / self.t_ns;
+                let remaining = remaining.min(self.burst);
+                let reset_after_ns = new_tat.saturating_sub(now);
+                return harrow::RateLimitOutcome {
+                    allowed: true,
+                    limit: self.limit,
+                    remaining,
+                    reset_after_ns,
+                    retry_after_ns: 0,
+                };
+            }
+        }
+    }
+}
+
+impl harrow::RateLimitBackend for InMemoryBackend {
+    fn check(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = harrow::RateLimitOutcome> + Send {
+        let now = now_ns();
+        if let Some(entry) = self.states.get(key) {
+            return std::future::ready(self.gcra_check(entry.value(), now));
+        }
+        let entry = self
+            .states
+            .entry(key.to_string())
+            .or_insert_with(|| AtomicU64::new(0));
+        std::future::ready(self.gcra_check(entry.value(), now))
+    }
+}
