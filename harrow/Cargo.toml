@@ -19,6 +19,7 @@ openapi = ["harrow-core/openapi", "dep:bytes"]
 
 # Server features (only apply when tokio is selected)
 tls = ["harrow-server-tokio/tls"]
+ws = ["harrow-server-tokio/ws"]
 profiling = ["harrow-core/profiling", "harrow-server-tokio?/profiling"]
 
 # Middleware features — each pulls in harrow-middleware with the right feature

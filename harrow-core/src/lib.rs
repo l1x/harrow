@@ -12,6 +12,9 @@ pub mod state;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
+#[cfg(feature = "ws")]
+pub mod ws;
+
 pub use client::{Client, TestResponse};
 pub use handler::HandlerFn;
 pub use middleware::{Middleware, Next};

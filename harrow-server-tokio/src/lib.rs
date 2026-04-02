@@ -1,3 +1,6 @@
+#[cfg(feature = "ws")]
+pub mod ws;
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;

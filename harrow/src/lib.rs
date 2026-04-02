@@ -97,6 +97,12 @@ pub mod runtime {
     }
 }
 
+#[cfg(feature = "ws")]
+pub mod ws {
+    pub use harrow_core::ws::Message;
+    pub use harrow_server_tokio::ws::{WebSocket, upgrade};
+}
+
 #[cfg(feature = "request-id")]
 pub use harrow_middleware::request_id::{request_id_middleware, request_id_middleware_with_header};
 

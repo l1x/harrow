@@ -228,6 +228,12 @@ impl Request {
     pub fn inner(&self) -> &http::Request<Body> {
         &self.inner
     }
+
+    /// Mutable access to the raw inner `http::Request<Body>`.
+    /// Used by WebSocket upgrade to extract the `OnUpgrade` handle.
+    pub fn inner_mut(&mut self) -> &mut http::Request<Body> {
+        &mut self.inner
+    }
 }
 
 /// Errors that can occur when reading a request body.
