@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Experimental monoio-based HTTP/1.1 server for Harrow"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 bytes = { workspace = true }

@@ -8,6 +8,7 @@ use http_body_util::combinators::BoxBody;
 use percent_encoding::percent_decode_str;
 
 use crate::path::PathMatch;
+use crate::response::{IntoResponse, Response};
 use crate::state::{MissingExtError, TypeMap};
 
 /// Type-erased request body. Allows constructing requests from any body type
@@ -264,8 +265,8 @@ impl std::fmt::Display for BodyError {
 
 impl std::error::Error for BodyError {}
 
-impl crate::response::IntoResponse for BodyError {
-    fn into_response(self) -> crate::response::Response {
+impl IntoResponse for BodyError {
+    fn into_response(self) -> Response {
         use http::StatusCode;
         match &self {
             BodyError::TooLarge => {
@@ -280,9 +281,9 @@ impl crate::response::IntoResponse for BodyError {
     }
 }
 
-impl From<BodyError> for crate::response::Response {
+impl From<BodyError> for Response {
     fn from(err: BodyError) -> Self {
-        crate::response::IntoResponse::into_response(err)
+        err.into_response()
     }
 }
 

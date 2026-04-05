@@ -2,6 +2,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::response::{IntoResponse, Response};
+
 /// Error returned when a required state type is not registered.
 #[derive(Debug)]
 pub struct MissingStateError {
@@ -21,15 +23,15 @@ impl fmt::Display for MissingStateError {
 
 impl std::error::Error for MissingStateError {}
 
-impl crate::response::IntoResponse for MissingStateError {
-    fn into_response(self) -> crate::response::Response {
-        crate::response::Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+impl IntoResponse for MissingStateError {
+    fn into_response(self) -> Response {
+        Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
     }
 }
 
-impl From<MissingStateError> for crate::response::Response {
+impl From<MissingStateError> for Response {
     fn from(err: MissingStateError) -> Self {
-        crate::response::IntoResponse::into_response(err)
+        err.into_response()
     }
 }
 
@@ -51,15 +53,15 @@ impl fmt::Display for MissingExtError {
 
 impl std::error::Error for MissingExtError {}
 
-impl crate::response::IntoResponse for MissingExtError {
-    fn into_response(self) -> crate::response::Response {
-        crate::response::Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+impl IntoResponse for MissingExtError {
+    fn into_response(self) -> Response {
+        Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
     }
 }
 
-impl From<MissingExtError> for crate::response::Response {
+impl From<MissingExtError> for Response {
     fn from(err: MissingExtError) -> Self {
-        crate::response::IntoResponse::into_response(err)
+        err.into_response()
     }
 }
 

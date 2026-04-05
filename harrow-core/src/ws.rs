@@ -13,7 +13,7 @@ use http::header::{
 };
 
 use crate::request::Request;
-use crate::response::Response;
+use crate::response::{IntoResponse, Response};
 
 /// The WebSocket GUID used in the Sec-WebSocket-Accept computation (RFC 6455).
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -54,7 +54,7 @@ impl std::fmt::Display for WsError {
 
 impl std::error::Error for WsError {}
 
-impl crate::response::IntoResponse for WsError {
+impl IntoResponse for WsError {
     fn into_response(self) -> Response {
         let status = match &self {
             WsError::NotUpgradable => StatusCode::INTERNAL_SERVER_ERROR,
@@ -67,7 +67,7 @@ impl crate::response::IntoResponse for WsError {
 
 impl From<WsError> for Response {
     fn from(err: WsError) -> Self {
-        crate::response::IntoResponse::into_response(err)
+        err.into_response()
     }
 }
 

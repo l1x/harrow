@@ -433,9 +433,6 @@ mod tests {
 
     #[tokio::test]
     async fn chained_combinators() {
-        use crate::dispatch::{SharedState, dispatch};
-        use std::sync::Arc;
-
         let app = crate::route::App::new()
             .middleware(map_request(|mut req| {
                 req.set_ext(42u32);

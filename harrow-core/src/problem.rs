@@ -112,6 +112,12 @@ impl IntoResponse for ProblemDetail {
     }
 }
 
+impl From<ProblemDetail> for Response {
+    fn from(pd: ProblemDetail) -> Self {
+        pd.into_response()
+    }
+}
+
 fn append_json_field(out: &mut String, first: &mut bool, key: &str, value: &str) {
     if !*first {
         out.push(',');
