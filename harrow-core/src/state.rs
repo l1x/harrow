@@ -21,6 +21,12 @@ impl fmt::Display for MissingStateError {
 
 impl std::error::Error for MissingStateError {}
 
+impl crate::response::IntoResponse for MissingStateError {
+    fn into_response(self) -> crate::response::Response {
+        crate::response::Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+    }
+}
+
 /// Error returned when a required per-request extension is not present.
 #[derive(Debug)]
 pub struct MissingExtError {
@@ -38,6 +44,12 @@ impl fmt::Display for MissingExtError {
 }
 
 impl std::error::Error for MissingExtError {}
+
+impl crate::response::IntoResponse for MissingExtError {
+    fn into_response(self) -> crate::response::Response {
+        crate::response::Response::new(http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+    }
+}
 
 /// A type-erased map keyed by `TypeId`.
 /// Used for application state injection.
