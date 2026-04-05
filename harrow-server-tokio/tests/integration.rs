@@ -1730,3 +1730,154 @@ async fn tcp_o11y_middleware_runs_on_405() {
         "o11y middleware should add request-id header on 405 over TCP"
     );
 }
+
+// ============================================================================
+// WebSocket tests (feature = "ws")
+// ============================================================================
+
+#[cfg(feature = "ws")]
+mod ws_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use harrow_core::response::IntoResponse;
+    use harrow_core::ws::Message;
+    use harrow_server_tokio::ws;
+    use tokio_tungstenite::tungstenite;
+
+    /// Echo handler: sends back whatever it receives, stops on Close.
+    async fn ws_echo(req: Request) -> Response {
+        ws::upgrade(req, |mut socket| async move {
+            while let Some(Ok(msg)) = socket.recv().await {
+                match msg {
+                    Message::Close(_) => break,
+                    other => {
+                        let _ = socket.send(other).await;
+                    }
+                }
+            }
+        })
+        .unwrap_or_else(|e| e.into_response())
+    }
+
+    #[tokio::test]
+    async fn ws_raw_handshake_returns_rfc_accept() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let req = format!(
+            "GET /ws HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let deadline = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let n = stream.read(&mut tmp).await.unwrap();
+                assert!(n > 0, "server closed connection before responding");
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+        });
+        deadline.await.expect("server did not respond in time");
+        let raw = String::from_utf8_lossy(&buf);
+
+        assert!(raw.contains("101"));
+        assert!(
+            raw.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "Sec-WebSocket-Accept must match RFC 6455 example"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_text_echo() {
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let (mut stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        stream
+            .send(tungstenite::Message::Text("hello".into()))
+            .await
+            .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg, tungstenite::Message::Text("hello".into()));
+
+        stream.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_binary_echo() {
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let (mut stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        let payload: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        stream
+            .send(tungstenite::Message::Binary(payload.clone().into()))
+            .await
+            .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg, tungstenite::Message::Binary(payload.into()));
+
+        stream.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_multiple_messages() {
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let (mut stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        for i in 0..5 {
+            let text = format!("msg-{i}");
+            stream
+                .send(tungstenite::Message::Text(text.clone().into()))
+                .await
+                .unwrap();
+
+            let msg = stream.next().await.unwrap().unwrap();
+            assert_eq!(msg, tungstenite::Message::Text(text.into()));
+        }
+
+        stream.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_non_upgrade_request_returns_400() {
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let (status, _, _) = http_get(addr, "/ws").await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_on_wrong_path_returns_404() {
+        let app = App::new().get("/ws", ws_echo);
+        let addr = start_server(app).await;
+
+        let url = format!("ws://127.0.0.1:{}/nope", addr.port());
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err());
+    }
+}

@@ -99,8 +99,8 @@ pub mod runtime {
 
 #[cfg(feature = "ws")]
 pub mod ws {
-    pub use harrow_core::ws::Message;
-    pub use harrow_server_tokio::ws::{WebSocket, upgrade};
+    pub use harrow_core::ws::{Message, Utf8Bytes, close_code};
+    pub use harrow_server_tokio::ws::{WebSocket, WsConfig, upgrade, upgrade_with_config};
 }
 
 #[cfg(feature = "request-id")]

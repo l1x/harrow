@@ -220,7 +220,13 @@ pub async fn serve_with_config(
                             .timer(hyper_util::rt::TokioTimer::new())
                             .header_read_timeout(hrt);
                     }
-                    let conn = builder.serve_connection(io, service);
+                    // Always use serve_connection_with_upgrades — it's a
+                    // strict superset with zero overhead for non-upgrade
+                    // connections. into_owned() is needed because the
+                    // UpgradeableConnection borrows the builder.
+                    let conn = builder
+                        .serve_connection_with_upgrades(io, service)
+                        .into_owned();
 
                     if let Some(ct) = connection_timeout {
                         match tokio::time::timeout(ct, conn).await {

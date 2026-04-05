@@ -16,9 +16,9 @@ use crate::request::Request;
 use crate::response::Response;
 
 /// The WebSocket GUID used in the Sec-WebSocket-Accept computation (RFC 6455).
-const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-5AB53F3B86DB";
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// Errors that can occur during WebSocket handshake validation.
+/// Errors that can occur during WebSocket handshake or transport.
 #[derive(Debug)]
 pub enum WsError {
     /// Missing or incorrect `Upgrade: websocket` header.
@@ -29,6 +29,10 @@ pub enum WsError {
     MissingKey,
     /// Missing or unsupported `Sec-WebSocket-Version` (must be "13").
     UnsupportedVersion,
+    /// The hyper `OnUpgrade` handle was not present in request extensions.
+    NotUpgradable,
+    /// A transport-level error on the WebSocket connection.
+    Transport(String),
 }
 
 impl std::fmt::Display for WsError {
@@ -40,6 +44,10 @@ impl std::fmt::Display for WsError {
             WsError::UnsupportedVersion => {
                 write!(f, "unsupported Sec-WebSocket-Version (expected 13)")
             }
+            WsError::NotUpgradable => {
+                write!(f, "connection does not support upgrades")
+            }
+            WsError::Transport(msg) => write!(f, "websocket transport error: {msg}"),
         }
     }
 }
@@ -48,7 +56,12 @@ impl std::error::Error for WsError {}
 
 impl crate::response::IntoResponse for WsError {
     fn into_response(self) -> Response {
-        Response::new(StatusCode::BAD_REQUEST, self.to_string())
+        let status = match &self {
+            WsError::NotUpgradable => StatusCode::INTERNAL_SERVER_ERROR,
+            WsError::Transport(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        Response::new(status, self.to_string())
     }
 }
 
@@ -101,25 +114,162 @@ pub fn accept_key(key: &str) -> String {
 }
 
 /// Build the HTTP 101 Switching Protocols response for a WebSocket upgrade.
-pub fn upgrade_response(key: &str) -> Response {
+pub fn upgrade_response(key: &str, protocol: Option<&str>) -> Response {
     let accept = accept_key(key);
-    Response::new(StatusCode::SWITCHING_PROTOCOLS, "")
+    let resp = Response::new(StatusCode::SWITCHING_PROTOCOLS, "")
         .header(UPGRADE.as_str(), "websocket")
         .header(CONNECTION.as_str(), "Upgrade")
-        .header(SEC_WEBSOCKET_ACCEPT.as_str(), &accept)
+        .header(SEC_WEBSOCKET_ACCEPT.as_str(), &accept);
+    match protocol {
+        Some(p) => resp.header("sec-websocket-protocol", p),
+        None => resp,
+    }
+}
+
+/// Negotiate a subprotocol from the client's `Sec-WebSocket-Protocol` header.
+///
+/// Returns the first server-supported protocol that the client also requested,
+/// or `None` if there is no match.
+pub fn negotiate_protocol<'a>(req: &Request, supported: &'a [&str]) -> Option<&'a str> {
+    let header = req.header("sec-websocket-protocol")?;
+    let client_protocols: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+    supported
+        .iter()
+        .find(|&&s| client_protocols.iter().any(|&c| c.eq_ignore_ascii_case(s)))
+        .copied()
+}
+
+/// WebSocket close codes (RFC 6455 Section 7.4.1).
+pub mod close_code {
+    /// Normal closure (1000).
+    pub const NORMAL: u16 = 1000;
+    /// Endpoint going away (1001), e.g. server shutdown or browser navigating away.
+    pub const AWAY: u16 = 1001;
+    /// Protocol error (1002).
+    pub const PROTOCOL: u16 = 1002;
+    /// Unsupported data type (1003), e.g. text-only endpoint received binary.
+    pub const UNSUPPORTED: u16 = 1003;
+    /// No status code present (1005). Must not be sent in a close frame.
+    pub const NO_STATUS: u16 = 1005;
+    /// Abnormal closure (1006). Must not be sent in a close frame.
+    pub const ABNORMAL: u16 = 1006;
+    /// Invalid payload data (1007), e.g. non-UTF-8 in a text message.
+    pub const INVALID: u16 = 1007;
+    /// Policy violation (1008).
+    pub const POLICY: u16 = 1008;
+    /// Message too big (1009).
+    pub const TOO_BIG: u16 = 1009;
+    /// Missing expected extension (1010).
+    pub const EXTENSION: u16 = 1010;
+    /// Unexpected server error (1011).
+    pub const ERROR: u16 = 1011;
+}
+
+/// UTF-8 validated bytes, backed by ref-counted `Bytes` for zero-copy.
+#[derive(Clone, Eq)]
+pub struct Utf8Bytes(bytes::Bytes);
+
+impl Utf8Bytes {
+    /// Wrap `Bytes` that are known to be valid UTF-8.
+    ///
+    /// # Safety
+    /// The caller must guarantee that `bytes` contains valid UTF-8.
+    pub unsafe fn from_bytes_unchecked(bytes: bytes::Bytes) -> Self {
+        Self(bytes)
+    }
+
+    /// View the underlying bytes as a string slice.
+    pub fn as_str(&self) -> &str {
+        // SAFETY: constructor guarantees valid UTF-8.
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+
+    /// Consume into the underlying `Bytes`.
+    pub fn into_bytes(self) -> bytes::Bytes {
+        self.0
+    }
+}
+
+impl std::ops::Deref for Utf8Bytes {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Debug for Utf8Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl std::fmt::Display for Utf8Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq for Utf8Bytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<str> for Utf8Bytes {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for Utf8Bytes {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for Utf8Bytes {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl std::hash::Hash for Utf8Bytes {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
+    }
+}
+
+impl From<String> for Utf8Bytes {
+    fn from(s: String) -> Self {
+        Self(bytes::Bytes::from(s.into_bytes()))
+    }
+}
+
+impl From<&str> for Utf8Bytes {
+    fn from(s: &str) -> Self {
+        Self(bytes::Bytes::copy_from_slice(s.as_bytes()))
+    }
+}
+
+impl TryFrom<bytes::Bytes> for Utf8Bytes {
+    type Error = std::str::Utf8Error;
+    fn try_from(bytes: bytes::Bytes) -> Result<Self, Self::Error> {
+        std::str::from_utf8(&bytes)?;
+        Ok(Self(bytes))
+    }
 }
 
 /// WebSocket message types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// UTF-8 text message.
-    Text(String),
+    Text(Utf8Bytes),
     /// Binary message.
-    Binary(Vec<u8>),
+    Binary(bytes::Bytes),
     /// Ping message.
-    Ping(Vec<u8>),
+    Ping(bytes::Bytes),
     /// Pong message.
-    Pong(Vec<u8>),
+    Pong(bytes::Bytes),
     /// Close message with optional code and reason.
     Close(Option<(u16, String)>),
 }
@@ -146,17 +296,34 @@ mod tests {
     }
 
     #[test]
+    fn accept_key_matches_rfc6455_example() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        assert_eq!(accept_key(key), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
     fn upgrade_response_has_correct_headers() {
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
-        let resp = upgrade_response(key);
+        let resp = upgrade_response(key, None);
         assert_eq!(resp.status_code(), StatusCode::SWITCHING_PROTOCOLS);
         let inner = resp.into_inner();
         assert_eq!(inner.headers().get(UPGRADE).unwrap(), "websocket");
         assert_eq!(inner.headers().get(CONNECTION).unwrap(), "Upgrade");
-        assert!(inner.headers().get(SEC_WEBSOCKET_ACCEPT).is_some());
         assert_eq!(
             inner.headers().get(SEC_WEBSOCKET_ACCEPT).unwrap(),
-            &accept_key(key),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        );
+        assert!(inner.headers().get("sec-websocket-protocol").is_none());
+    }
+
+    #[test]
+    fn upgrade_response_includes_selected_protocol() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let resp = upgrade_response(key, Some("graphql-ws"));
+        let inner = resp.into_inner();
+        assert_eq!(
+            inner.headers().get("sec-websocket-protocol").unwrap(),
+            "graphql-ws",
         );
     }
 }
