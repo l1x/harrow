@@ -3,6 +3,7 @@ name = "harrow-serde"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Feature-gated serialization formats (JSON, MessagePack) for Harrow"
 
 [features]
