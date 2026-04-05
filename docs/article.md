@@ -1,7 +1,7 @@
 # Harrow Performance Journal
 
 **Status:** living document  
-**Last updated:** 2026-03-31
+**Last updated:** 2026-04-05
 
 This is not a launch post and not a benchmark victory lap. It is a dated
 engineering log for Harrow's performance work: what we measured, what moved the
@@ -1118,6 +1118,150 @@ WebSocket/SSE today, or your team is invested in the extractor pattern.
 
 The full migration reference with additional examples is in
 [`docs/migration-from-axum.md`](./migration-from-axum.md).
+
+## 2026-04-05: WebSocket Support and First crates.io Release
+
+Harrow 0.9.0 shipped WebSocket support and landed on crates.io for the first
+time. This section covers the design decisions, a subtle bug that survived
+unit tests, and an ergonomics improvement that required understanding how
+Rust's `?` operator actually works.
+
+### Design: thin wrapper, feature-gated, runtime-agnostic core
+
+WebSocket is split across two crates:
+
+- **harrow-core** (`ws` feature): handshake validation, accept key computation,
+  `Message` enum, `Utf8Bytes` type, `WsError`, close code constants, subprotocol
+  negotiation. No runtime dependency — this compiles for any backend.
+- **harrow-server-tokio** (`ws` feature): `WebSocket` struct wrapping
+  `tokio-tungstenite`, `upgrade()` / `upgrade_with_config()`, `Stream`/`Sink`
+  impls, message conversion.
+
+The `ws` feature pulls in `tokio-tungstenite` and `sha1`/`base64`. If you
+don't enable it, zero WebSocket code compiles.
+
+### The RFC 6455 GUID bug
+
+The first implementation had the wrong GUID constant:
+
+```
+Wrong:   258EAFA5-E914-47DA-95CA-5AB53F3B86DB
+Correct: 258EAFA5-E914-47DA-95CA-C5AB0DC85B11
+```
+
+This is a magic string from RFC 6455 used in the `Sec-WebSocket-Accept`
+computation. Every accept key the server produced was wrong, and
+`tokio-tungstenite` (the client in our integration tests) correctly rejected
+it with `SecWebSocketAcceptKeyMismatch`.
+
+The unit tests passed because they were self-referential — `upgrade_response()`
+was compared against `accept_key()`, and both used the same wrong GUID. The
+test checked that the output was deterministic and had the right length, not
+that it matched the RFC's expected value.
+
+The fix was two lines: correct the GUID, and add an RFC vector test that pins
+the literal expected output (`s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`) for the RFC's
+sample key. The `upgrade_response` test was also changed to assert the literal
+value instead of calling `accept_key()` again.
+
+**Lesson:** when implementing a protocol with fixed test vectors in the spec,
+always include at least one test that asserts the spec's exact expected output.
+Self-referential tests (compute A, compute B from the same code, check A == B)
+cannot catch errors in shared constants or algorithms.
+
+### serve_connection_with_upgrades — always on
+
+The initial implementation gated `serve_connection_with_upgrades` behind
+`#[cfg(feature = "ws")]`, falling back to `serve_connection` without it. This
+created a subtle failure mode: if someone forgot the feature flag but wrote a
+WebSocket handler, `OnUpgrade` would not be present in the request extensions,
+and the upgrade function would silently return a 101 response without actually
+upgrading the connection. The client would hang.
+
+We checked how axum handles this. It always uses `serve_connection_with_upgrades`
+unconditionally. Reading the hyper-util source confirmed there is zero per-poll
+overhead for non-upgrade connections — the only difference materializes when a
+101 response is returned, at which point you need the upgrade machinery anyway.
+
+The fix: remove the `cfg` gate, always use `serve_connection_with_upgrades`,
+and change the `OnUpgrade` extraction from a silent `if let Some(...)` to an
+explicit `Err(WsError::NotUpgradable)`.
+
+### Zero-copy Utf8Bytes
+
+`Message::Text` originally held `String`. On every received text message,
+tungstenite's `Utf8Bytes` (which wraps `bytes::Bytes`, already validated as
+UTF-8) was converted to `String` via `.to_string()` — allocating and copying.
+
+We created `harrow_core::ws::Utf8Bytes`, a thin wrapper around `bytes::Bytes`
+that guarantees UTF-8 validity. It derefs to `&str`, implements `PartialEq`
+with `str`/`String`/`&str`, and has `From<String>` and `From<&str>`.
+
+The receive path is now zero-copy:
+
+```
+tungstenite::Utf8Bytes → bytes::Bytes (Into, zero-copy)
+                       → harrow::Utf8Bytes (unsafe from_bytes_unchecked, zero-copy)
+```
+
+The `unsafe` is sound because tungstenite already validated the UTF-8 before
+constructing its `Utf8Bytes`. We do not re-validate.
+
+Why not use tungstenite's `Utf8Bytes` directly? harrow-core is
+runtime-agnostic. It should not depend on tungstenite. The harrow `Utf8Bytes`
+has the same layout (`Bytes` wrapper) but lives in the core crate.
+
+### From<Error> for Response — making ? actually work
+
+After adding `IntoResponse` for `MissingStateError`, `MissingExtError`,
+`BodyError`, and `WsError`, we documented that handlers could "use `?`
+directly." This was wrong.
+
+Rust's `?` operator uses `From`, not arbitrary conversion traits. Given a
+handler returning `Result<Response, Response>` and `require_state()` returning
+`Result<&T, MissingStateError>`, the `?` needs `From<MissingStateError> for
+Response`. Having `IntoResponse for MissingStateError` is irrelevant — `?`
+does not know about `IntoResponse`.
+
+The fix was adding targeted `From` impls that delegate to `IntoResponse`:
+
+```rust
+impl From<MissingStateError> for Response {
+    fn from(err: MissingStateError) -> Self {
+        err.into_response()
+    }
+}
+```
+
+We considered a blanket `impl<E: IntoResponse> From<E> for Response` but it
+is impossible in stable Rust — it conflicts with the standard library's
+reflexive `impl<T> From<T> for T` (since `Response` itself implements
+`IntoResponse`). The targeted impls for each error type are the correct
+approach.
+
+With this, the handler pattern is clean:
+
+```rust
+async fn handle(req: Request) -> Response {
+    let db = req.require_state::<Arc<DbPool>>()?.clone();
+    let body: CreateUser = req.body_json().await?;
+    // ...
+}
+```
+
+No `.unwrap()`, no `.map_err()`. Missing state returns 500, bad body returns
+400/413, and the process never panics on a request path.
+
+### What shipped in 0.9.x
+
+- **0.9.0**: WebSocket support, `Utf8Bytes`, `bytes::Bytes` message types,
+  `Stream`/`Sink` impls, `WsConfig` builder, subprotocol negotiation, auto
+  close response, close code constants. First crates.io publish.
+- **0.9.1**: `IntoResponse` for `MissingStateError` and `MissingExtError`.
+- **0.9.2**: `From<Error> for Response` for all error types (the `?` fix).
+- **0.9.3**: `From<ProblemDetail> for Response`, consistent import style,
+  removed unused test imports, added README to crate packages.
+- **0.9.4**: MIT license file, CHANGELOG.md, README version updates.
 
 ## What This Document Should Become
 
