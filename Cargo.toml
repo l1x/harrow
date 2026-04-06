@@ -9,14 +9,16 @@ members = [
     "harrow-serde",
     "harrow-server-tokio",
     "harrow-server-monoio",
+    "harrow-server-meguri",
     "harrow-bench",
+    "meguri",
 ]
 
 [workspace.package]
 version = "0.9.4"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/l1x/harrow"
+repository = "https://github.com/vectorian-rs/harrow"
 readme = "README.md"
 
 [workspace.dependencies]
@@ -26,6 +28,8 @@ harrow-middleware = { path = "harrow-middleware", version = "0.9.4" }
 harrow-serde = { path = "harrow-serde", version = "0.9.4" }
 harrow-server-tokio = { path = "harrow-server-tokio", version = "0.9.4" }
 harrow-server-monoio = { path = "harrow-server-monoio", version = "0.9.4" }
+harrow-server-meguri = { path = "harrow-server-meguri", version = "0.9.4" }
+meguri = { path = "meguri", version = "0.1.0" }
 
 bytes = "1"
 http = "1"
@@ -53,6 +57,7 @@ dashmap = "6"
 monoio = { version = "0.2", features = ["bytes"] }
 httparse = "1.10"
 proptest = "1"
+libc = "0.2"
 
 [profile.bench]
 debug = true

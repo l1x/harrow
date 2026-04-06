@@ -19,3 +19,5 @@ infra/**/terraform.tfstate.*.backup
 results/
 .grakno/
 .chizu/
+.beads/
+.agent-prompts/
