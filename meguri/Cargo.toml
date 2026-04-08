@@ -1,0 +1,32 @@
+[package]
+name = "meguri"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A pure, safe, Tokio-free io_uring library for Rust"
+
+# This crate is NOT published to crates.io.
+# It lives in the Harrow workspace for co-development.
+# When mature, it will be spun out to its own repository and published.
+publish = false
+
+[features]
+default = []
+sqpoll = []
+io_uring_5_11 = []
+io_uring_5_19 = []
+io_uring_6_0 = []
+io_uring_6_11 = []
+profiling = []
+
+[dependencies]
+bytes = { workspace = true }
+tracing = { workspace = true }
+slab = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
