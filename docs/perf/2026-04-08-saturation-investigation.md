@@ -48,11 +48,14 @@ ssh alpine@<CLIENT> "docker images --format '{{.Repository}}:{{.Tag}}' | grep ar
 
 ## Servers Under Test
 
-| ID | Server | Backend | Allocator | Docker Flags |
-|---|---|---|---|---|
-| harrow-tokio-prod | harrow-perf-server:arm64-0.9.4 | tokio (epoll) | mimalloc | --network host --ulimit nofile=65535:65535 |
-| harrow-monoio-prod | harrow-server-monoio:arm64-0.9.4 | monoio (io_uring) | mimalloc | --network host --ulimit nofile=65535:65535 **--privileged** |
-| axum-prod | axum-perf-server:arm64-0.9.4 | tokio (epoll) | mimalloc | --network host --ulimit nofile=65535:65535 |
+| ID | Server | Framework | Backend | Allocator | Docker Flags |
+|---|---|---|---|---|---|
+| harrow-tokio-prod | harrow-perf-server:arm64-0.9.4 | harrow | tokio (epoll) | mimalloc | --network host --ulimit nofile=65535:65535 |
+| harrow-monoio-prod | harrow-server-monoio:arm64-0.9.4 | harrow | monoio (io_uring) | mimalloc | --network host --ulimit nofile=65535:65535 **--privileged** |
+| axum-prod | axum-perf-server:arm64-0.9.4 | axum | tokio (epoll) | mimalloc | --network host --ulimit nofile=65535:65535 |
+| tako-prod | tako-perf-server:arm64-0.9.4 | tako | tokio (epoll) | mimalloc | --network host --ulimit nofile=65535:65535 |
+| salvo-prod | salvo-perf-server:arm64-0.9.4 | salvo | tokio (hyper) | mimalloc | --network host --ulimit nofile=65535:65535 |
+| warp-prod | warp-perf-server:arm64-0.9.4 | warp | tokio (hyper) | mimalloc | --network host --ulimit nofile=65535:65535 |
 
 ## Load Generators
 
@@ -65,19 +68,18 @@ ssh alpine@<CLIENT> "docker images --format '{{.Repository}}:{{.Tag}}' | grep ar
 
 Find the max rps for each server. Run via the harness for consistency.
 
-**Suite:** `harrow-bench/suites/spinr-vs-wrk3.toml` — case `spinr-text-c128`
+**Suite:** `harrow-bench/suites/framework-comparison.toml`
 
 ```bash
-# For each IMPL in harrow-tokio-prod harrow-monoio-prod axum-prod:
+# For each IMPL in harrow-tokio-prod harrow-monoio-prod axum-prod tako-prod salvo-prod warp-prod:
 cargo run -p harrow-bench --release --bin bench-single -- \
     --impl ${IMPL} \
-    --suite harrow-bench/suites/spinr-vs-wrk3.toml \
+    --suite harrow-bench/suites/framework-comparison.toml \
     --registry harrow-bench/implementations.toml \
     --mode remote \
     --server-ssh <SERVER_IP> --client-ssh <CLIENT_IP> \
     --server-private-ip <PRIVATE_IP> \
-    --no-build-missing --duration 30 --warmup 5 \
-    --case spinr-text-c128
+    --no-build-missing --duration 30 --warmup 5
 ```
 
 **After each run**, verify monoio log:
@@ -88,21 +90,24 @@ cargo run -p harrow-bench --release --bin bench-single -- \
 
 ### Expected Results Table
 
-| Server | Backend | RPS | p99 |
-|---|---|---|---|
-| harrow-tokio-prod | tokio/epoll | ? | ? |
-| harrow-monoio-prod | monoio/io_uring | ? | ? |
-| axum-prod | tokio/epoll | ? | ? |
+| Server | Framework | Backend | text RPS | json-1kb RPS | json-10kb RPS |
+|---|---|---|---|---|---|
+| harrow-tokio-prod | harrow | tokio/epoll | ? | ? | ? |
+| harrow-monoio-prod | harrow | monoio/io_uring | ? | ? | ? |
+| axum-prod | axum | tokio/epoll | ? | ? | ? |
+| tako-prod | tako | tokio/epoll | ? | ? | ? |
+| salvo-prod | salvo | tokio/hyper | ? | ? | ? |
+| warp-prod | warp | tokio/hyper | ? | ? | ? |
 
 ## Phase 2: Rate Ladder (wrk3)
 
 Step through increasing rates to find the latency inflection point.
-Run all 3 servers through the same ladder.
+Run all 6 servers through the same ladder.
 
 **Suite:** `harrow-bench/suites/rate-ladder.toml`
 
 ```bash
-# For each IMPL in harrow-tokio-prod harrow-monoio-prod axum-prod:
+# For each IMPL in harrow-tokio-prod harrow-monoio-prod axum-prod tako-prod salvo-prod warp-prod:
 cargo run -p harrow-bench --release --bin bench-single -- \
     --impl ${IMPL} \
     --suite harrow-bench/suites/rate-ladder.toml \
@@ -115,13 +120,13 @@ cargo run -p harrow-bench --release --bin bench-single -- \
 
 ### Expected Results Table
 
-| Rate | harrow-tokio p50/p99 | harrow-monoio p50/p99 | axum p50/p99 |
-|---|---|---|---|
-| 500k | ? / ? | ? / ? | ? / ? |
-| 600k | ? / ? | ? / ? | ? / ? |
-| 700k | ? / ? | ? / ? | ? / ? |
-| 800k | ? / ? | ? / ? | ? / ? |
-| 900k | ? / ? | ? / ? | ? / ? |
+| Rate | harrow-tokio | harrow-monoio | axum | tako | salvo | warp |
+|---|---|---|---|---|---|---|
+| 500k | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? |
+| 600k | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? |
+| 700k | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? |
+| 800k | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? |
+| 900k | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? | ? / ? |
 
 Look for: the rate where p99 jumps from single-digit ms to 100ms+ (the "knee").
 

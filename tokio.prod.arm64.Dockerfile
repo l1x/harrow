@@ -46,7 +46,8 @@ COPY harrow-bench/src harrow-bench/src
 RUN cargo build --locked --release --target=aarch64-unknown-linux-gnu \
         -p harrow-bench \
         --bin harrow-server-tokio --bin axum-server \
-        --bin harrow-perf-server --bin axum-perf-server
+        --bin harrow-perf-server --bin axum-perf-server \
+        --bin tako-perf-server --bin salvo-perf-server --bin warp-perf-server
 
 FROM gcr.io/distroless/cc-debian13:latest-arm64 AS harrow-server-tokio
 COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/harrow-server-tokio /
@@ -71,3 +72,24 @@ ENV MIMALLOC_ALLOW_DECOMMIT=0
 ENV MIMALLOC_EAGER_COMMIT=1
 COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/axum-perf-server /
 CMD ["/axum-perf-server", "--bind", "0.0.0.0"]
+
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS tako-perf-server
+ENV MIMALLOC_LARGE_OS_PAGES=1
+ENV MIMALLOC_ALLOW_DECOMMIT=0
+ENV MIMALLOC_EAGER_COMMIT=1
+COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/tako-perf-server /
+CMD ["/tako-perf-server", "--bind", "0.0.0.0"]
+
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS salvo-perf-server
+ENV MIMALLOC_LARGE_OS_PAGES=1
+ENV MIMALLOC_ALLOW_DECOMMIT=0
+ENV MIMALLOC_EAGER_COMMIT=1
+COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/salvo-perf-server /
+CMD ["/salvo-perf-server", "--bind", "0.0.0.0"]
+
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS warp-perf-server
+ENV MIMALLOC_LARGE_OS_PAGES=1
+ENV MIMALLOC_ALLOW_DECOMMIT=0
+ENV MIMALLOC_EAGER_COMMIT=1
+COPY --from=build-env /app/target/aarch64-unknown-linux-gnu/release/warp-perf-server /
+CMD ["/warp-perf-server", "--bind", "0.0.0.0"]

@@ -1,0 +1,58 @@
+name = "framework-comparison"
+description = "6-way Rust framework comparison — spinr (ceiling) + wrk3 (latency ladder)"
+
+# =============================================================================
+# SPINR — max throughput (find ceiling for each framework)
+# =============================================================================
+
+[[case]]
+id = "spinr-text-c128"
+generator = "spinr"
+template = "../spinr/text-c128.toml"
+concurrency = 128
+
+[[case]]
+id = "spinr-json-1kb-c128"
+generator = "spinr"
+template = "../spinr/json-1kb-c128.toml"
+concurrency = 128
+
+[[case]]
+id = "spinr-json-10kb-c128"
+generator = "spinr"
+template = "../spinr/json-10kb-c128.toml"
+concurrency = 128
+
+# =============================================================================
+# WRK3 — constant rate latency (100k baseline, well below ceiling)
+# =============================================================================
+
+[[case]]
+id = "wrk3-text-c128-100k"
+generator = "wrk3"
+template = "../wrk3/text-c128.wrk3.toml"
+concurrency = 128
+rate = 100000
+
+[case.context]
+path = "/text"
+
+[[case]]
+id = "wrk3-json-1kb-c128-100k"
+generator = "wrk3"
+template = "../wrk3/json-1kb-c128.wrk3.toml"
+concurrency = 128
+rate = 100000
+
+[case.context]
+path = "/json/1kb"
+
+[[case]]
+id = "wrk3-json-10kb-c128-100k"
+generator = "wrk3"
+template = "../wrk3/json-10kb-c128.wrk3.toml"
+concurrency = 128
+rate = 50000
+
+[case.context]
+path = "/json/10kb"
