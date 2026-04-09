@@ -13,6 +13,8 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+use harrow_bench::harness::ops;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -214,7 +216,7 @@ fn run_bench(
 // ---------------------------------------------------------------------------
 
 fn generate_report(results: &BTreeMap<String, Value>, outdir: &Path, duration: u32, warmup: u32) {
-    let now = chrono_lite_utc();
+    let now = ops::chrono_lite_utc();
     let mut report = format!(
         "# Harrow vs Axum — Framework Comparison\n\
          \n\
@@ -263,36 +265,12 @@ fn generate_report(results: &BTreeMap<String, Value>, outdir: &Path, duration: u
 }
 
 fn val_str(v: &Value, key: &str) -> String {
-    match v.get(key) {
-        Some(Value::Number(n)) => {
-            if let Some(f) = n.as_f64() {
-                if f == f.floor() && f.abs() < 1e15 {
-                    format!("{}", f as i64)
-                } else {
-                    format!("{f:.3}")
-                }
-            } else {
-                n.to_string()
-            }
-        }
-        Some(v) => v.to_string(),
-        None => "N/A".into(),
-    }
+    let s = ops::val_str(v, key);
+    if s == "-" { "N/A".into() } else { s }
 }
 
 fn s(v: &str) -> String {
     v.into()
-}
-
-/// Minimal UTC timestamp without pulling in chrono.
-fn chrono_lite_utc() -> String {
-    let output = Command::new("date")
-        .args(["-u", "+%Y-%m-%d %H:%M UTC"])
-        .output();
-    match output {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        Err(_) => "unknown".into(),
-    }
 }
 
 // ---------------------------------------------------------------------------

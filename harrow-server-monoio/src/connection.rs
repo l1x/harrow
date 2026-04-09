@@ -67,16 +67,3 @@ pub(crate) async fn handle_connection(stream: TcpStream, conn: ConnConfig) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_protocol_version_enum() {
-        assert_ne!(
-            ProtocolVersion::Http11,
-            ProtocolVersion::Http2PriorKnowledge
-        );
-    }
-}

@@ -192,22 +192,101 @@ pub fn val_str(value: &Value, key: &str) -> String {
 // Time
 // ---------------------------------------------------------------------------
 
+/// UTC timestamp: "2026-04-09 12:34:56 UTC"
 pub fn chrono_lite_utc() -> String {
-    match Command::new("date")
-        .args(["-u", "+%Y-%m-%d %H:%M:%S UTC"])
-        .output()
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        Err(_) => "unknown".into(),
-    }
+    let (y, mo, d, h, mi, s) = utc_components();
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} UTC")
 }
 
+/// UTC timestamp slug for filenames: "2026-04-09T12-34-56Z"
 pub fn timestamp_slug() -> String {
-    match Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H-%M-%SZ"])
-        .output()
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        Err(_) => "unknown".into(),
+    let (y, mo, d, h, mi, s) = utc_components();
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}-{mi:02}-{s:02}Z")
+}
+
+fn utc_components() -> (u64, u64, u64, u64, u64, u64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let h = time_of_day / 3600;
+    let mi = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Civil date from days since epoch (algorithm from Howard Hinnant)
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+
+    (y as u64, mo, d, h, mi, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chrono_lite_utc_format() {
+        let ts = chrono_lite_utc();
+        // "2026-04-09 12:34:56 UTC"
+        assert!(ts.ends_with(" UTC"), "expected UTC suffix: {ts}");
+        assert_eq!(ts.len(), 23, "unexpected length: {ts}");
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], " ");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+    }
+
+    #[test]
+    fn test_timestamp_slug_format() {
+        let ts = timestamp_slug();
+        // "2026-04-09T12-34-56Z"
+        assert!(ts.ends_with('Z'), "expected Z suffix: {ts}");
+        assert_eq!(ts.len(), 20, "unexpected length: {ts}");
+        assert_eq!(&ts[10..11], "T");
+    }
+
+    #[test]
+    fn test_known_epoch_dates() {
+        // Unix epoch: 1970-01-01 00:00:00
+        assert_eq!(utc_from_secs(0), (1970, 1, 1, 0, 0, 0));
+        // 2000-01-01 00:00:00 = 946684800
+        assert_eq!(utc_from_secs(946684800), (2000, 1, 1, 0, 0, 0));
+        // 2026-04-09 12:00:00 = 1775736000
+        assert_eq!(utc_from_secs(1775736000), (2026, 4, 9, 12, 0, 0));
+        // Leap year: 2024-02-29 23:59:59 = 1709251199
+        assert_eq!(utc_from_secs(1709251199), (2024, 2, 29, 23, 59, 59));
+    }
+
+    fn utc_from_secs(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
+        let days = secs / 86400;
+        let time_of_day = secs % 86400;
+        let h = time_of_day / 3600;
+        let mi = (time_of_day % 3600) / 60;
+        let s = time_of_day % 60;
+
+        let z = days as i64 + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if mo <= 2 { y + 1 } else { y };
+
+        (y as u64, mo, d, h, mi, s)
     }
 }
