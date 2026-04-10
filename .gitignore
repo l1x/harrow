@@ -18,6 +18,7 @@ infra/**/terraform.tfstate.*.backup
 **/proptest-regressions/
 results/
 perf/
+artifacts/
 .grakno/
 .chizu/
 .beads/
