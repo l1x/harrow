@@ -3,7 +3,7 @@
 !.dockerignore
 !Cargo.toml
 !Cargo.lock
-!*.Dockerfile
+!docker/
 
 !harrow/
 !harrow/Cargo.toml

@@ -275,7 +275,7 @@ fn default_results_dir(mode: RunMode, suite: &SuiteSpec, variants: &[RunVariant]
         ),
     };
     PathBuf::from(format!(
-        "artifacts/bench/{ts}-{}-{}",
+        "perf/{ts}-{}-{}",
         sanitize_label(&suite.name),
         label
     ))

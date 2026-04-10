@@ -21,7 +21,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -630,13 +630,9 @@ fn parse_args() -> Args {
     let server_url = server_url.unwrap_or_else(|| format!("http://localhost:{port}"));
 
     let results_dir = results_dir_override.unwrap_or_else(|| {
-        let ts = Command::new("date")
-            .args(["-u", "+%Y-%m-%dT%H-%M-%SZ"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unknown".into());
+        let ts = ops::timestamp_slug();
         let instance = instance_type.as_deref().unwrap_or("unknown");
-        PathBuf::from(format!("docs/perf/{instance}/{ts}"))
+        PathBuf::from(format!("perf/{instance}/{ts}"))
     });
 
     Args {
