@@ -184,6 +184,7 @@ run = "docker tag harrow-bench:prod-sysalloc-${HARROW_VERSION} ${ECR}/harrow/har
 [tasks."bench:ecr-push:prod-sysalloc".env]
 AWS_PROFILE = "datadeft-dev"
 ECR = "529001354082.dkr.ecr.eu-west-1.amazonaws.com"
+HARROW_VERSION = "0.9.4"
 
 [tasks."bench:ecr-push:harrow-monoio"]
 description = "Push harrow-server-monoio to ECR"
