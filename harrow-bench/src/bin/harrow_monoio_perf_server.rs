@@ -134,15 +134,20 @@ fn main() {
             std::env::var("OTLP_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:4318".to_string());
 
         use harrow::AppO11yExt;
+        use harrow::o11y::init_telemetry;
         use harrow_o11y::O11yConfig;
 
-        app = app.o11y(
-            O11yConfig::default()
-                .service_name("harrow-bench-o11y")
-                .service_version("0.2.0")
-                .environment("bench")
-                .otlp_traces_endpoint(otlp_endpoint),
-        );
+        let config = O11yConfig::default()
+            .service_name("harrow-bench-o11y")
+            .service_version("0.2.0")
+            .environment("bench")
+            .otlp_traces_endpoint(otlp_endpoint);
+
+        // Leak the guard so it lives for the process lifetime.
+        let guard = init_telemetry(config.clone());
+        std::mem::forget(guard);
+
+        app = app.o11y(config);
         eprintln!("o11y enabled");
     }
 

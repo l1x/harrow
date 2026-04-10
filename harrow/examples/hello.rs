@@ -1,4 +1,4 @@
-use harrow::o11y::O11yConfig;
+use harrow::o11y::{O11yConfig, init_telemetry};
 use harrow::{App, AppO11yExt, Request, Response};
 
 async fn hello(_req: Request) -> Response {
@@ -18,11 +18,17 @@ async fn health(_req: Request) -> Response {
 async fn main() {
     let addr = "127.0.0.1:3000".parse().unwrap();
 
+    let config = O11yConfig {
+        otlp_traces_endpoint: option_env!("OTLP_ENDPOINT").map(String::from),
+        ..O11yConfig::default()
+    };
+
+    // Initialize the global tracing subscriber. Hold the guard for the
+    // lifetime of the process so the OTLP exporter stays alive.
+    let _guard = init_telemetry(config.clone());
+
     let app = App::new()
-        .o11y(O11yConfig {
-            otlp_traces_endpoint: option_env!("OTLP_ENDPOINT").map(String::from),
-            ..O11yConfig::default()
-        })
+        .o11y(config)
         .get("/", hello)
         .get("/greet/:name", greet)
         .group("/api", |g| g.get("/health", health));

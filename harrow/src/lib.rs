@@ -202,6 +202,48 @@ pub use openapi_ext::AppOpenApiExt;
 pub mod o11y {
     pub use harrow_middleware::o11y::o11y_middleware;
     pub use harrow_o11y::O11yConfig;
+    pub use rolly_tokio::{
+        InitError, TelemetryGuard, TelemetryConfig, LayerConfig, TelemetrySink, NullSink,
+        build_layer,
+    };
+
+    /// Initialize the global tracing subscriber with rolly's OTLP exporter.
+    ///
+    /// Returns a [`TelemetryGuard`] that **must** be held for the lifetime of
+    /// the application — dropping it flushes and shuts down the exporter.
+    ///
+    /// Call this **once**, early in `main`, before constructing the [`App`].
+    /// Then use [`.o11y()`](super::AppO11yExt::o11y) to register the
+    /// middleware and config without touching the subscriber.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a global tracing subscriber is already set or the OTLP
+    /// exporter cannot start. For the fallible version, use
+    /// [`try_init_telemetry`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harrow::o11y::{O11yConfig, init_telemetry};
+    ///
+    /// let config = O11yConfig::default().service_name("my-app");
+    /// let _guard = init_telemetry(config.clone());
+    ///
+    /// let app = harrow::App::new().o11y(config);
+    /// ```
+    pub fn init_telemetry(config: O11yConfig) -> TelemetryGuard {
+        rolly_tokio::init_global_once(config.into())
+    }
+
+    /// Fallible version of [`init_telemetry`].
+    ///
+    /// Returns [`InitError::SubscriberAlreadySet`] if a global subscriber is
+    /// already installed, or [`InitError::Exporter`] if the OTLP exporter
+    /// cannot start.
+    pub fn try_init_telemetry(config: O11yConfig) -> Result<TelemetryGuard, InitError> {
+        rolly_tokio::try_init_global(config.into())
+    }
 }
 
 #[cfg(feature = "o11y")]
@@ -213,9 +255,20 @@ mod o11y_ext {
 
     use crate::App;
 
-    /// Extension trait that wires `O11yConfig` into application state,
-    /// initialises the rolly telemetry subscriber, and registers the
-    /// o11y middleware in one call.
+    /// Extension trait that wires observability into a Harrow application.
+    ///
+    /// `.o11y(config)` does three things:
+    ///
+    /// 1. **Tries** to initialize the global tracing subscriber via rolly.
+    ///    If a subscriber is already set (because the application set one up
+    ///    first), this step is silently skipped — no panic, no error.
+    /// 2. Stores `Arc<O11yConfig>` in application state.
+    /// 3. Registers the o11y middleware (request IDs, trace IDs, metrics).
+    ///
+    /// This means simple apps get a working one-liner, while apps that
+    /// manage their own subscriber (or compose rolly's layer into it via
+    /// [`harrow::o11y::build_layer`](super::o11y::build_layer)) are not
+    /// blocked.
     pub trait AppO11yExt {
         fn o11y(self, config: O11yConfig) -> Self;
     }
@@ -226,10 +279,23 @@ mod o11y_ext {
 
     impl AppO11yExt for App {
         fn o11y(self, config: O11yConfig) -> Self {
-            let guard = rolly_tokio::init_global_once(config.clone().into());
+            let app = match rolly_tokio::try_init_global(config.clone().into()) {
+                Ok(guard) => self.state(Arc::new(TelemetryGuardHolder(guard))),
+                Err(rolly_tokio::InitError::SubscriberAlreadySet(_)) => {
+                    tracing::warn!(
+                        "harrow .o11y(): global tracing subscriber already set, \
+                         skipping rolly subscriber initialization. \
+                         OTLP export will only work if the existing subscriber \
+                         includes rolly's layer (see harrow::o11y::build_layer)."
+                    );
+                    self
+                }
+                Err(e) => {
+                    panic!("harrow .o11y(): failed to start telemetry exporter: {e}");
+                }
+            };
 
-            self.state(Arc::new(TelemetryGuardHolder(guard)))
-                .state(Arc::new(config))
+            app.state(Arc::new(config))
                 .middleware(o11y_middleware)
         }
     }
