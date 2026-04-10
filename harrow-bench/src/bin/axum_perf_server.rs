@@ -6,15 +6,7 @@
 //!
 //! Usage: axum-perf-server [--bind ADDR] [--port PORT] [--compression]
 
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-const ALLOCATOR_NAME: &str = if cfg!(feature = "mimalloc") {
-    "mimalloc"
-} else {
-    "system"
-};
+harrow_bench::setup_allocator!();
 
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;

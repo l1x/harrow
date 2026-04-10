@@ -10,6 +10,7 @@ description = "Benchmarks and load driver for Harrow"
 [features]
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 harrow = { path = "../harrow", features = ["tokio", "monoio", "json", "msgpack", "request-id", "cors", "compression", "compression-br", "catch-panic", "o11y", "body-limit", "rate-limit", "session"] }
@@ -31,9 +32,11 @@ minijinja = "2.12"
 blake3 = { workspace = true }
 dashmap = { workspace = true }
 mimalloc = { workspace = true, optional = true }
+tikv-jemallocator = { version = "0.6", optional = true }
 tako-rs = "1.1"
 salvo = { version = "0.90", default-features = false, features = ["server", "server-handle", "http1", "http2"] }
 warp = { version = "0.4", features = ["server"] }
+ntex = { version = "3", features = ["tokio"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -123,6 +126,10 @@ path = "src/bin/salvo_perf_server.rs"
 [[bin]]
 name = "warp-perf-server"
 path = "src/bin/warp_perf_server.rs"
+
+[[bin]]
+name = "ntex-perf-server"
+path = "src/bin/ntex_perf_server.rs"
 
 [[bench]]
 name = "echo"

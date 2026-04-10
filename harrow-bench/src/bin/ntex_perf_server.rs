@@ -1,4 +1,4 @@
-//! Warp performance benchmark server.
+//! ntex performance benchmark server.
 //!
 //! Exposes the same routes as `axum-perf-server` for fair comparison.
 //!
@@ -8,14 +8,32 @@
 //!   GET /json/10kb  -> ~10KB JSON (100 user objects)
 //!   GET /health     -> "ok" (text/plain)
 //!
-//! Usage: warp-perf-server [--bind ADDR] [--port PORT]
+//! Usage: ntex-perf-server [--bind ADDR] [--port PORT]
 
 harrow_bench::setup_allocator!();
 
-use std::net::SocketAddr;
+use harrow_bench::{USERS_10, USERS_100, User};
+use ntex::web;
 
-use harrow_bench::{USERS_10, USERS_100};
-use warp::Filter;
+#[web::get("/text")]
+async fn text_handler() -> &'static str {
+    "ok"
+}
+
+#[web::get("/json/1kb")]
+async fn json_1kb_handler() -> web::types::Json<&'static Vec<User>> {
+    web::types::Json(&*USERS_10)
+}
+
+#[web::get("/json/10kb")]
+async fn json_10kb_handler() -> web::types::Json<&'static Vec<User>> {
+    web::types::Json(&*USERS_100)
+}
+
+#[web::get("/health")]
+async fn health_handler() -> &'static str {
+    "ok"
+}
 
 fn parse_args() -> (String, u16) {
     let args: Vec<String> = std::env::args().collect();
@@ -38,7 +56,7 @@ fn parse_args() -> (String, u16) {
             }
             other => {
                 eprintln!("unknown option: {other}");
-                eprintln!("usage: warp-perf-server [--bind ADDR] [--port PORT]");
+                eprintln!("usage: ntex-perf-server [--bind ADDR] [--port PORT]");
                 std::process::exit(1);
             }
         }
@@ -46,25 +64,21 @@ fn parse_args() -> (String, u16) {
     (bind, port)
 }
 
-#[tokio::main]
-async fn main() {
+#[ntex::main]
+async fn main() -> std::io::Result<()> {
     let (bind, port) = parse_args();
-    let addr: SocketAddr = format!("{bind}:{port}").parse().unwrap();
+    let addr = format!("{bind}:{port}");
 
-    let text = warp::path!("text").and(warp::get()).map(|| "ok");
+    eprintln!("ntex-perf-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
 
-    let json_1kb = warp::path!("json" / "1kb")
-        .and(warp::get())
-        .map(|| warp::reply::json(&*USERS_10));
-
-    let json_10kb = warp::path!("json" / "10kb")
-        .and(warp::get())
-        .map(|| warp::reply::json(&*USERS_100));
-
-    let health = warp::path!("health").and(warp::get()).map(|| "ok");
-
-    let routes = text.or(json_1kb).or(json_10kb).or(health);
-
-    eprintln!("warp-perf-server listening on {addr} [allocator: {ALLOCATOR_NAME}]");
-    warp::serve(routes).run(addr).await;
+    web::HttpServer::new(async || {
+        web::App::new()
+            .service(text_handler)
+            .service(json_1kb_handler)
+            .service(json_10kb_handler)
+            .service(health_handler)
+    })
+    .bind(&addr)?
+    .run()
+    .await
 }

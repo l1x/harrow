@@ -73,6 +73,18 @@
   changed_when: true
   when: inventory_hostname in groups['server']
 
+- name: Pull ntex-perf-server from ECR
+  ansible.builtin.command:
+    cmd: "docker pull {{ ecr_registry }}/harrow/load-generators:ntex-v{{ harrow_version }}"
+  changed_when: true
+  when: inventory_hostname in groups['server']
+
+- name: Tag ntex-perf-server for local use
+  ansible.builtin.command:
+    cmd: "docker tag {{ ecr_registry }}/harrow/load-generators:ntex-v{{ harrow_version }} ntex-perf-server:arm64-{{ harrow_version }}"
+  changed_when: true
+  when: inventory_hostname in groups['server']
+
 # Client: pull spinr load tester
 - name: Pull spinr from ECR
   ansible.builtin.command:

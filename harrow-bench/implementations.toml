@@ -129,3 +129,150 @@ backend = "tokio"
 profile = "prod"
 health_path = "/health"
 platform = "linux/arm64"
+
+[[implementation]]
+id = "ntex-prod"
+image = "ntex-perf-server:arm64-0.9.4"
+build_task = "docker:prod-arm64:ntex-perf-server"
+command = "/ntex-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "ntex"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+# ── jemalloc variants ────────────────────────────────────────────────
+
+[[implementation]]
+id = "harrow-jemalloc"
+image = "harrow-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:harrow-perf-server-jemalloc"
+command = "/harrow-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "harrow"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "axum-jemalloc"
+image = "axum-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:axum-perf-server-jemalloc"
+command = "/axum-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "axum"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "tako-jemalloc"
+image = "tako-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:tako-perf-server-jemalloc"
+command = "/tako-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "tako"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "salvo-jemalloc"
+image = "salvo-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:salvo-perf-server-jemalloc"
+command = "/salvo-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "salvo"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "warp-jemalloc"
+image = "warp-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:warp-perf-server-jemalloc"
+command = "/warp-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "warp"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "ntex-jemalloc"
+image = "ntex-perf-server:arm64-0.9.4-jemalloc"
+build_task = "docker:prod-arm64:ntex-perf-server-jemalloc"
+command = "/ntex-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "ntex"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+# ── sysalloc variants ───────────────────────────────────────────────
+
+[[implementation]]
+id = "harrow-sysalloc"
+image = "harrow-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:harrow-perf-server-sysalloc"
+command = "/harrow-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "harrow"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "axum-sysalloc"
+image = "axum-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:axum-perf-server-sysalloc"
+command = "/axum-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "axum"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "tako-sysalloc"
+image = "tako-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:tako-perf-server-sysalloc"
+command = "/tako-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "tako"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "salvo-sysalloc"
+image = "salvo-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:salvo-perf-server-sysalloc"
+command = "/salvo-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "salvo"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "warp-sysalloc"
+image = "warp-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:warp-perf-server-sysalloc"
+command = "/warp-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "warp"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"
+
+[[implementation]]
+id = "ntex-sysalloc"
+image = "ntex-perf-server:arm64-0.9.4-sysalloc"
+build_task = "docker:prod-arm64:ntex-perf-server-sysalloc"
+command = "/ntex-perf-server --bind 0.0.0.0 --port {{ port }}"
+framework = "ntex"
+backend = "tokio"
+profile = "prod"
+health_path = "/health"
+platform = "linux/arm64"

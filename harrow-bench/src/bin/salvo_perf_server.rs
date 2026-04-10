@@ -10,15 +10,7 @@
 //!
 //! Usage: salvo-perf-server [--bind ADDR] [--port PORT]
 
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-const ALLOCATOR_NAME: &str = if cfg!(feature = "mimalloc") {
-    "mimalloc"
-} else {
-    "system"
-};
+harrow_bench::setup_allocator!();
 
 use harrow_bench::{USERS_10, USERS_100, User};
 use salvo::prelude::*;

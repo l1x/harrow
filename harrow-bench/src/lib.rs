@@ -6,6 +6,30 @@
 pub mod harness;
 pub mod perf_summary;
 
+/// Set up the global allocator and define `ALLOCATOR_NAME`.
+///
+/// Usage: put `harrow_bench::setup_allocator!();` at the top of each perf server binary.
+#[macro_export]
+macro_rules! setup_allocator {
+    () => {
+        #[cfg(feature = "mimalloc")]
+        #[global_allocator]
+        static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+        #[cfg(feature = "jemalloc")]
+        #[global_allocator]
+        static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+        const ALLOCATOR_NAME: &str = if cfg!(feature = "mimalloc") {
+            "mimalloc"
+        } else if cfg!(feature = "jemalloc") {
+            "jemalloc"
+        } else {
+            "system"
+        };
+    };
+}
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
