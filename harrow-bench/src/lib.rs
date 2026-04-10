@@ -42,18 +42,26 @@ pub fn parse_bind_port() -> (String, u16) {
 
 /// Set up the global allocator and define `ALLOCATOR_NAME`.
 ///
+/// Exactly one of three configurations:
+/// - `--features mimalloc` (default) → mimalloc
+/// - `--no-default-features --features jemalloc` → jemalloc
+/// - `--no-default-features` → system allocator
+///
 /// Usage: put `harrow_bench::setup_allocator!();` at the top of each perf server binary.
 #[macro_export]
 macro_rules! setup_allocator {
     () => {
         #[cfg(all(feature = "mimalloc", feature = "jemalloc"))]
-        compile_error!("features `mimalloc` and `jemalloc` are mutually exclusive");
+        compile_error!(
+            "features `mimalloc` and `jemalloc` are mutually exclusive — \
+             use `--features mimalloc` OR `--no-default-features --features jemalloc`"
+        );
 
         #[cfg(feature = "mimalloc")]
         #[global_allocator]
         static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-        #[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
+        #[cfg(feature = "jemalloc")]
         #[global_allocator]
         static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
