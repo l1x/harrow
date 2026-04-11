@@ -13,6 +13,9 @@ publish = false
 
 [features]
 default = []
+# Enable this feature to get a clear compile_error on non-Linux instead of
+# an empty crate. harrow-server-meguri enables this automatically.
+io-uring = []
 sqpoll = []
 io_uring_5_11 = []
 io_uring_5_19 = []

@@ -15,6 +15,9 @@ description = "io_uring server backend for Harrow using meguri"
 
 [features]
 default = []
+# Explicit opt-in: fires compile_error on non-Linux for a clear message.
+# harrow's `meguri` feature enables this.
+io-uring = ["meguri/io-uring"]
 profiling = ["meguri/profiling"]
 
 [dependencies]

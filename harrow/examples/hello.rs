@@ -1,4 +1,4 @@
-use harrow::o11y::{init_telemetry, O11yConfig};
+use harrow::o11y::{O11yConfig, init_telemetry};
 use harrow::{App, AppO11yExt, Request, Response};
 
 async fn hello(_req: Request) -> Response {

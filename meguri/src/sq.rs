@@ -283,11 +283,7 @@ impl SubmissionQueue {
     ///
     /// The previous SQE must have been pushed with `IOSQE_IO_LINK` flag.
     /// `ts` must remain valid until the CQE is reaped.
-    pub fn push_link_timeout(
-        &mut self,
-        user_data: u64,
-        ts: *const libc::timespec,
-    ) -> bool {
+    pub fn push_link_timeout(&mut self, user_data: u64, ts: *const libc::timespec) -> bool {
         let Some(sqe) = self.next_sqe() else {
             return false;
         };

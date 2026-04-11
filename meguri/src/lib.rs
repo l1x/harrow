@@ -43,12 +43,17 @@
 //!
 //! This guarantees: **buffers are never freed while the kernel is using them**.
 
-// io_uring is a Linux-only kernel feature. Fail fast on other platforms.
-#[cfg(not(target_os = "linux"))]
+// io_uring is a Linux-only kernel feature. Fail fast on other platforms
+// when the `io-uring` feature is enabled (which it is by default).
+// Disable default features to compile meguri as an empty crate on non-Linux,
+// allowing workspace-wide cargo commands to succeed.
+#[cfg(all(feature = "io-uring", not(target_os = "linux")))]
 compile_error!(
     "meguri requires Linux. io_uring is a Linux kernel feature and is not \
      available on macOS, Windows, or BSD. For cross-platform async I/O, \
-     use the tokio or monoio backend instead."
+     use the tokio or monoio backend instead. \
+     To allow this crate to compile as an empty stub (e.g. for workspace-wide \
+     cargo fmt/clippy on macOS), disable the default `io-uring` feature."
 );
 
 #[cfg(target_os = "linux")]

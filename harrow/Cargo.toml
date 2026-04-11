@@ -13,7 +13,7 @@ default = []
 # Server backends (pick exactly one)
 tokio = ["dep:harrow-server-tokio"]
 monoio = ["dep:harrow-server-monoio"]
-meguri = ["dep:harrow-server-meguri"]  # Linux only — not yet published to crates.io
+# meguri = ["dep:harrow-server-meguri", "harrow-server-meguri/io-uring"]  # Linux only — not yet on crates.io
 
 # Content formats
 json = ["harrow-core/json"]
@@ -23,7 +23,7 @@ openapi = ["harrow-core/openapi", "dep:bytes"]
 # Server features (only apply when tokio is selected)
 tls = ["harrow-server-tokio/tls"]
 ws = ["harrow-server-tokio/ws"]
-profiling = ["harrow-core/profiling", "harrow-server-tokio?/profiling", "harrow-server-meguri?/profiling"]
+profiling = ["harrow-core/profiling", "harrow-server-tokio?/profiling"]
 
 # Middleware features — each pulls in harrow-middleware with the right feature
 request-id = ["dep:harrow-middleware", "harrow-middleware/request-id"]
@@ -42,7 +42,7 @@ harrow-middleware = { workspace = true, optional = true }
 harrow-o11y = { workspace = true, optional = true }
 harrow-server-tokio = { workspace = true, optional = true }
 harrow-server-monoio = { workspace = true, optional = true }
-harrow-server-meguri = { workspace = true, optional = true }
+# harrow-server-meguri = { workspace = true, optional = true }  # not yet on crates.io
 rolly-tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }

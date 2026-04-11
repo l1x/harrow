@@ -44,38 +44,22 @@ pub use harrow_core::route::{App, Group, Route, RouteMetadata, RouteSummary, Rou
 pub use harrow_core::state::{MissingExtError, MissingStateError, TypeMap};
 
 // Root-level re-exports for single-backend mode.
-#[cfg(all(feature = "tokio", not(feature = "monoio"), not(feature = "meguri")))]
+#[cfg(all(feature = "tokio", not(feature = "monoio")))]
 pub use harrow_server_tokio::{
     ServerConfig, serve, serve_multi_worker, serve_with_config, serve_with_shutdown,
 };
 
-#[cfg(all(feature = "monoio", not(feature = "tokio"), not(feature = "meguri")))]
+#[cfg(all(feature = "monoio", not(feature = "tokio")))]
 pub use harrow_server_monoio::{
     ServerConfig, ServerHandle, run, run_with_config, serve, serve_with_config,
     serve_with_shutdown, start, start_with_config,
 };
 
-#[cfg(all(feature = "meguri", not(target_os = "linux")))]
-compile_error!(
-    "the `meguri` server backend requires Linux. io_uring is a Linux kernel \
-     feature and is not available on macOS, Windows, or BSD. \
-     Use `tokio` for cross-platform development instead."
-);
-
-#[cfg(all(
-    feature = "meguri",
-    not(feature = "tokio"),
-    not(feature = "monoio"),
-    target_os = "linux"
-))]
-pub use harrow_server_meguri::{ServerConfig, serve, serve_with_config};
-
-#[cfg(not(any(feature = "tokio", feature = "monoio", feature = "meguri")))]
+#[cfg(not(any(feature = "tokio", feature = "monoio")))]
 compile_error!(
     "harrow requires a server backend feature. \
      Enable exactly one of: `tokio` for cross-platform compatibility, \
-     `monoio` for io_uring via Monoio (Linux 6.1+), \
-     or `meguri` for pure io_uring (Linux). \
+     or `monoio` for io_uring via Monoio (Linux 6.1+). \
      Example: harrow = {{ version = \"0.9\", features = [\"tokio\"] }}"
 );
 
@@ -112,22 +96,6 @@ pub mod runtime {
         };
     }
 
-    /// Meguri-based server (pure io_uring, no Tokio).
-    ///
-    /// Available when the `meguri` feature is enabled.
-    ///
-    /// This is Harrow's own io_uring implementation, exposing advanced
-    /// features that Monoio does not support: registered buffers, buffer
-    /// rings, zero-copy send, multishot recv, operation chaining.
-    ///
-    /// # Requirements
-    /// - Linux kernel 5.6+ (basic io_uring)
-    /// - Linux kernel 5.11+ for EXT_ARG timeout optimization
-    /// - Linux kernel 6.0+ for SEND_ZC
-    #[cfg(all(feature = "meguri", target_os = "linux"))]
-    pub mod meguri {
-        pub use harrow_server_meguri::{ServerConfig, serve, serve_with_config};
-    }
 }
 
 #[cfg(feature = "ws")]
@@ -203,7 +171,7 @@ pub mod o11y {
     pub use harrow_middleware::o11y::o11y_middleware;
     pub use harrow_o11y::O11yConfig;
     pub use rolly_tokio::{
-        InitError, TelemetryGuard, TelemetryConfig, LayerConfig, TelemetrySink, NullSink,
+        InitError, LayerConfig, NullSink, TelemetryConfig, TelemetryGuard, TelemetrySink,
         build_layer,
     };
 
@@ -307,8 +275,7 @@ mod o11y_ext {
         }
 
         fn o11y_middleware(self, config: O11yConfig) -> Self {
-            self.state(Arc::new(config))
-                .middleware(o11y_middleware)
+            self.state(Arc::new(config)).middleware(o11y_middleware)
         }
     }
 }

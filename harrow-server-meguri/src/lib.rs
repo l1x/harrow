@@ -27,11 +27,9 @@
 //!
 //! **Linux only.** io_uring is a Linux kernel feature.
 
-// Linux only
-#[cfg(not(target_os = "linux"))]
-compile_error!(
-    "harrow-server-meguri requires Linux. io_uring is not available on this platform."
-);
+// Linux only — compile_error when io-uring feature is enabled on non-Linux.
+#[cfg(all(feature = "io-uring", not(target_os = "linux")))]
+compile_error!("harrow-server-meguri requires Linux. io_uring is not available on this platform.");
 
 #[cfg(target_os = "linux")]
 mod codec;
@@ -60,6 +58,7 @@ use harrow_core::dispatch::{self, SharedState};
 #[cfg(target_os = "linux")]
 use harrow_core::route::App;
 
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 /// Server configuration.
 pub struct ServerConfig {
@@ -80,6 +79,7 @@ pub struct ServerConfig {
     pub workers: Option<usize>,
 }
 
+#[cfg(target_os = "linux")]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -94,12 +94,15 @@ impl Default for ServerConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Special user_data value for the accept SQE.
 const ACCEPT_USER_DATA: u64 = u64::MAX;
 
+#[cfg(target_os = "linux")]
 /// Special user_data value for the periodic timeout SQE.
 const TIMEOUT_USER_DATA: u64 = u64::MAX - 1;
 
+#[cfg(target_os = "linux")]
 /// Interval for the periodic timeout sweep (1 second).
 const TIMEOUT_SWEEP_SECS: i64 = 1;
 
@@ -117,11 +120,7 @@ pub fn run(app: App, addr: SocketAddr) -> Result<(), BoxError> {
 
 /// Start with custom config and block until shutdown.
 #[cfg(target_os = "linux")]
-pub fn run_with_config(
-    app: App,
-    addr: SocketAddr,
-    config: ServerConfig,
-) -> Result<(), BoxError> {
+pub fn run_with_config(app: App, addr: SocketAddr, config: ServerConfig) -> Result<(), BoxError> {
     start_with_config(app, addr, config)?.wait()
 }
 
@@ -248,18 +247,17 @@ pub fn serve(app: App, addr: SocketAddr) -> Result<(), BoxError> {
 
 /// Single-threaded serve with custom config.
 #[cfg(target_os = "linux")]
-pub fn serve_with_config(
-    app: App,
-    addr: SocketAddr,
-    config: ServerConfig,
-) -> Result<(), BoxError> {
+pub fn serve_with_config(app: App, addr: SocketAddr, config: ServerConfig) -> Result<(), BoxError> {
     let shared = app.into_shared_state();
     shared.route_table.print_routes();
     tracing::info!("harrow (meguri) listening on {addr} (single worker)");
 
     let listener = create_listener(addr, true)?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    let per_worker = ServerConfig { workers: Some(1), ..config };
+    let per_worker = ServerConfig {
+        workers: Some(1),
+        ..config
+    };
 
     worker_loop(shared, listener, &per_worker, shutdown)?;
 
@@ -270,6 +268,7 @@ pub fn serve_with_config(
 // ServerHandle
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 /// Handle returned by `start` / `start_with_config`.
 ///
 /// Dropping the handle signals shutdown and waits for all workers to exit.
@@ -280,6 +279,7 @@ pub struct ServerHandle {
     workers: Vec<thread::JoinHandle<Result<(), BoxError>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl ServerHandle {
     /// The socket address the server bound to.
     pub fn local_addr(&self) -> SocketAddr {
@@ -327,6 +327,7 @@ impl ServerHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
@@ -336,6 +337,7 @@ impl Drop for ServerHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn join_panic_error(panic: Box<dyn std::any::Any + Send + 'static>) -> BoxError {
     let message = if let Some(message) = panic.downcast_ref::<&str>() {
         format!("worker thread panicked: {message}")
@@ -372,7 +374,9 @@ fn spawn_worker(
             Ok(l) => l,
             Err(e) => {
                 let _ = startup_tx.send(Err(Box::new(e) as BoxError));
-                return Err(Box::new(std::io::Error::other("failed to create listener")) as BoxError);
+                return Err(
+                    Box::new(std::io::Error::other("failed to create listener")) as BoxError
+                );
             }
         };
 
@@ -435,7 +439,12 @@ fn worker_loop(
     };
 
     // Submit initial accept and periodic timeout SQEs.
-    submit_accept(&mut ring, listener_fd, &mut accept_addr, &mut accept_addrlen);
+    submit_accept(
+        &mut ring,
+        listener_fd,
+        &mut accept_addr,
+        &mut accept_addrlen,
+    );
     submit_timeout(&mut ring, &sweep_ts);
 
     loop {
@@ -471,13 +480,7 @@ fn worker_loop(
                 submit_timeout(&mut ring, &sweep_ts);
             } else {
                 handle_conn_completion(
-                    user_data,
-                    res,
-                    &mut ring,
-                    &mut conns,
-                    &shared,
-                    &tokio_rt,
-                    config,
+                    user_data, res, &mut ring, &mut conns, &shared, &tokio_rt, config,
                 );
             }
 
@@ -495,13 +498,7 @@ fn worker_loop(
             let res = cqe.res;
             if user_data != ACCEPT_USER_DATA && user_data != TIMEOUT_USER_DATA {
                 handle_conn_completion(
-                    user_data,
-                    res,
-                    &mut ring,
-                    &mut conns,
-                    &shared,
-                    &tokio_rt,
-                    config,
+                    user_data, res, &mut ring, &mut conns, &shared, &tokio_rt, config,
                 );
             }
             ring.cq_mut().advance();
@@ -510,13 +507,12 @@ fn worker_loop(
     }
 
     if !conns.is_empty() {
-        tracing::warn!(
-            "drain timeout, {} connections aborted",
-            conns.len()
-        );
+        tracing::warn!("drain timeout, {} connections aborted", conns.len());
         // Close remaining connections.
         for conn in conns.drain() {
-            unsafe { libc::close(conn.fd); }
+            unsafe {
+                libc::close(conn.fd);
+            }
         }
     }
 
@@ -552,10 +548,7 @@ fn per_worker_config(config: ServerConfig, workers: usize) -> ServerConfig {
 }
 
 #[cfg(target_os = "linux")]
-fn create_listener(
-    addr: SocketAddr,
-    reuse_port: bool,
-) -> std::io::Result<std::net::TcpListener> {
+fn create_listener(addr: SocketAddr, reuse_port: bool) -> std::io::Result<std::net::TcpListener> {
     use std::os::fd::FromRawFd;
 
     let domain = if addr.is_ipv4() {
@@ -599,8 +592,8 @@ fn create_listener(
         let mut storage: libc::sockaddr_storage = std::mem::zeroed();
         let sa_len: libc::socklen_t = match addr {
             SocketAddr::V4(ref a) => {
-                let sin = &mut *(&mut storage as *mut libc::sockaddr_storage
-                    as *mut libc::sockaddr_in);
+                let sin =
+                    &mut *(&mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in);
                 sin.sin_family = libc::AF_INET as libc::sa_family_t;
                 sin.sin_port = a.port().to_be();
                 sin.sin_addr = libc::in_addr {
@@ -609,8 +602,8 @@ fn create_listener(
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
             }
             SocketAddr::V6(ref a) => {
-                let sin6 = &mut *(&mut storage as *mut libc::sockaddr_storage
-                    as *mut libc::sockaddr_in6);
+                let sin6 =
+                    &mut *(&mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in6);
                 sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
                 sin6.sin6_port = a.port().to_be();
                 sin6.sin6_flowinfo = a.flowinfo();
@@ -761,7 +754,11 @@ fn handle_conn_completion(
         conn.recv_pending = false;
 
         if res < 0 {
-            tracing::debug!("recv error on fd {}: {}", conn.fd, std::io::Error::from_raw_os_error(-res));
+            tracing::debug!(
+                "recv error on fd {}: {}",
+                conn.fd,
+                std::io::Error::from_raw_os_error(-res)
+            );
             close_conn(conn_idx, conns);
             return;
         }
@@ -826,7 +823,11 @@ fn handle_conn_completion(
         conn.write_pending = false;
 
         if res < 0 {
-            tracing::debug!("write error on fd {}: {}", conn.fd, std::io::Error::from_raw_os_error(-res));
+            tracing::debug!(
+                "write error on fd {}: {}",
+                conn.fd,
+                std::io::Error::from_raw_os_error(-res)
+            );
             close_conn(conn_idx, conns);
             return;
         }
@@ -876,10 +877,7 @@ fn submit_timeout(ring: &mut meguri::Ring, ts: &libc::timespec) {
 
 /// Sweep connections that have exceeded their timeouts.
 #[cfg(target_os = "linux")]
-fn sweep_timed_out_connections(
-    conns: &mut slab::Slab<connection::Conn>,
-    config: &ServerConfig,
-) {
+fn sweep_timed_out_connections(conns: &mut slab::Slab<connection::Conn>, config: &ServerConfig) {
     // Collect indices first to avoid borrow issues.
     let expired: Vec<usize> = conns
         .iter()
@@ -891,10 +889,7 @@ fn sweep_timed_out_connections(
         .collect();
 
     for idx in expired {
-        tracing::debug!(
-            "closing timed-out connection fd={}",
-            conns[idx].fd
-        );
+        tracing::debug!("closing timed-out connection fd={}", conns[idx].fd);
         close_conn(idx, conns);
     }
 }

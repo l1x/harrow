@@ -1265,13 +1265,12 @@ dependencies = [
 
 [[package]]
 name = "harrow"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bytes",
  "harrow-core",
  "harrow-middleware",
  "harrow-o11y",
- "harrow-server-meguri",
  "harrow-server-monoio",
  "harrow-server-tokio",
  "http",
@@ -1285,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-bench"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "axum",
  "blake3",
@@ -1321,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-core"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "base64",
  "bytes",
@@ -1345,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-middleware"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "blake3",
  "brotli 7.0.0",
@@ -1367,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-o11y"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "harrow-core",
  "rolly",
@@ -1376,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-serde"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -1386,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-server-meguri"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bytes",
  "harrow-core",
@@ -1405,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-server-monoio"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bolero",
  "bytes",
@@ -1425,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "harrow-server-tokio"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bytes",
  "dashmap",
