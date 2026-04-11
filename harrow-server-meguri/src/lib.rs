@@ -704,11 +704,13 @@ fn handle_accept(
 
     let conn = connection::Conn::new(fd);
     let conn_idx = conns.insert(conn);
-    submit_recv(ring, conn_idx, &mut conns[conn_idx]);
+    if !submit_recv(ring, conn_idx, &mut conns[conn_idx]) {
+        close_conn(conn_idx, conns);
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn submit_recv(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection::Conn) {
+fn submit_recv(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection::Conn) -> bool {
     // Ensure spare capacity for the kernel to write into.
     let spare = conn.buf.capacity() - conn.buf.len();
     if spare < codec::DEFAULT_BUFFER_SIZE {
@@ -726,10 +728,12 @@ fn submit_recv(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection::
         avail as u32,
         0,
     ) {
-        tracing::error!("SQ full, cannot submit RECV for fd {}", conn.fd);
+        tracing::error!("SQ full, dropping connection fd {}", conn.fd);
+        return false;
     }
 
     conn.recv_pending = true;
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -764,7 +768,10 @@ fn handle_conn_completion(
         }
 
         // Advance the buffer length to include the bytes the kernel wrote.
-        let nbytes = res as usize;
+        // Clamp to spare capacity as a safety invariant — the kernel should
+        // never return more than we requested, but trusting that blindly in
+        // an unsafe set_len would risk reading uninitialised memory.
+        let nbytes = (res as usize).min(conn.buf.capacity() - conn.buf.len());
         unsafe {
             conn.buf.set_len(conn.buf.len() + nbytes);
         }
@@ -773,7 +780,9 @@ fn handle_conn_completion(
 
         match result {
             connection::ProcessResult::NeedRecv => {
-                submit_recv(ring, conn_idx, &mut conns[conn_idx]);
+                if !submit_recv(ring, conn_idx, &mut conns[conn_idx]) {
+                    close_conn(conn_idx, conns);
+                }
             }
             connection::ProcessResult::Dispatch => {
                 // Send 100-continue if the client expects it.
@@ -788,8 +797,6 @@ fn handle_conn_completion(
                 let conn = &mut conns[conn_idx];
                 if let Some(req) = conn.build_harrow_request() {
                     let shared = Arc::clone(shared);
-                    // Dispatch and collect the response body inside the tokio
-                    // runtime context so body futures can be driven.
                     let (parts, body_data) = tokio_rt.block_on(async {
                         use http_body_util::BodyExt;
                         let resp = dispatch::dispatch(shared, req).await;
@@ -801,7 +808,9 @@ fn handle_conn_completion(
                         (parts, body_data)
                     });
                     conn.set_response(parts, body_data);
-                    submit_write(ring, conn_idx, &mut conns[conn_idx]);
+                    if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
+                        close_conn(conn_idx, conns);
+                    }
                 } else {
                     tracing::error!("failed to build request for fd {}", conn.fd);
                     close_conn(conn_idx, conns);
@@ -812,8 +821,11 @@ fn handle_conn_completion(
                 conn.response_buf = resp;
                 conn.response_written = 0;
                 conn.keep_alive = false;
+                conn.buf.clear();
                 conn.state = connection::ConnState::Writing;
-                submit_write(ring, conn_idx, &mut conns[conn_idx]);
+                if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
+                    close_conn(conn_idx, conns);
+                }
             }
             connection::ProcessResult::Close => {
                 close_conn(conn_idx, conns);
@@ -837,10 +849,14 @@ fn handle_conn_completion(
 
         match result {
             connection::WriteResult::WriteMore => {
-                submit_write(ring, conn_idx, &mut conns[conn_idx]);
+                if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
+                    close_conn(conn_idx, conns);
+                }
             }
             connection::WriteResult::RecvNext => {
-                submit_recv(ring, conn_idx, &mut conns[conn_idx]);
+                if !submit_recv(ring, conn_idx, &mut conns[conn_idx]) {
+                    close_conn(conn_idx, conns);
+                }
             }
             connection::WriteResult::Close => {
                 close_conn(conn_idx, conns);
@@ -850,10 +866,10 @@ fn handle_conn_completion(
 }
 
 #[cfg(target_os = "linux")]
-fn submit_write(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection::Conn) {
+fn submit_write(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection::Conn) -> bool {
     let remaining = &conn.response_buf[conn.response_written..];
     if remaining.is_empty() {
-        return;
+        return true;
     }
 
     if !ring.sq().push_send(
@@ -863,10 +879,12 @@ fn submit_write(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection:
         remaining.len() as u32,
         0,
     ) {
-        tracing::error!("SQ full, cannot submit WRITE for fd {}", conn.fd);
+        tracing::error!("SQ full, dropping connection fd {}", conn.fd);
+        return false;
     }
 
     conn.write_pending = true;
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -882,8 +900,7 @@ fn sweep_timed_out_connections(conns: &mut slab::Slab<connection::Conn>, config:
     let expired: Vec<usize> = conns
         .iter()
         .filter(|(_, c)| {
-            c.is_expired(config.connection_timeout)
-                || c.header_timed_out(config.header_read_timeout)
+            c.is_expired(config.connection_timeout) || c.read_timed_out(config.header_read_timeout)
         })
         .map(|(i, _)| i)
         .collect();

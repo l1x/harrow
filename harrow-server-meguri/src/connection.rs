@@ -347,13 +347,20 @@ impl Conn {
     }
 
     /// Check whether the connection has exceeded its lifetime limit.
+    ///
+    /// Note: this measures wall-clock time since accept, which includes
+    /// time spent in synchronous dispatch (handler execution).  A slow
+    /// upstream call counts against the connection lifetime.
     pub fn is_expired(&self, max_lifetime: Option<Duration>) -> bool {
         max_lifetime.is_some_and(|d| self.accepted_at.elapsed() >= d)
     }
 
-    /// Check whether the current request has exceeded the header read timeout.
-    pub fn header_timed_out(&self, timeout: Option<Duration>) -> bool {
-        matches!(self.state, ConnState::Headers)
+    /// Check whether the current request has exceeded the read timeout.
+    ///
+    /// Applies to both header and body read phases — a slow client
+    /// trickling body bytes is evicted the same as a slow header sender.
+    pub fn read_timed_out(&self, timeout: Option<Duration>) -> bool {
+        matches!(self.state, ConnState::Headers | ConnState::Body { .. })
             && timeout.is_some_and(|d| self.request_started_at.elapsed() >= d)
     }
 }

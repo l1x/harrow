@@ -259,7 +259,15 @@ impl SubmissionQueue {
 
     /// Build and push a `Timeout` SQE.
     ///
-    /// `ts` must remain valid until the CQE is reaped.
+    /// # Safety contract (caller must uphold)
+    ///
+    /// `ts` must point to a valid `libc::timespec` that remains alive and
+    /// unmodified until the corresponding CQE is consumed.  The kernel
+    /// reads from this address **asynchronously** after `submit_and_wait`
+    /// returns — if the pointee is freed, moved, or lives on a stack
+    /// frame that unwinds before the CQE arrives, the kernel will read
+    /// garbage.  In practice this means `ts` should live on the worker
+    /// loop's stack or in a heap allocation tied to the ring's lifetime.
     pub fn push_timeout(
         &mut self,
         user_data: u64,
@@ -282,7 +290,11 @@ impl SubmissionQueue {
     /// Build and push a `LinkTimeout` SQE (linked to the previous SQE).
     ///
     /// The previous SQE must have been pushed with `IOSQE_IO_LINK` flag.
-    /// `ts` must remain valid until the CQE is reaped.
+    ///
+    /// # Safety contract (caller must uphold)
+    ///
+    /// Same as [`push_timeout`](Self::push_timeout): `ts` must remain
+    /// valid and stable until the CQE is consumed.
     pub fn push_link_timeout(&mut self, user_data: u64, ts: *const libc::timespec) -> bool {
         let Some(sqe) = self.next_sqe() else {
             return false;
