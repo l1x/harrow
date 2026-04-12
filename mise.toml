@@ -1,6 +1,6 @@
 [env]
 _.python.venv = { path = ".venv", create = true }
-HARROW_VERSION = "0.9.5"
+HARROW_VERSION = "0.9.6"
 AWS_PROFILE = "datadeft-dev"
 ECR = "529001354082.dkr.ecr.eu-west-1.amazonaws.com"
 SPINR_VERSION = "0.5.1"
@@ -92,15 +92,15 @@ depends = [
 description = "Build perf ARM64 harrow-perf-server image"
 run = "docker build --provenance=false -t harrow-perf-server:perf-arm64 -f docker/tokio.perf.arm64.Dockerfile --target harrow-perf-server ."
 
-[tasks."docker:perf-arm64:axum-perf-server"]
-description = "Build perf ARM64 axum-perf-server image"
-run = "docker build --provenance=false -t axum-perf-server:perf-arm64 -f docker/tokio.perf.arm64.Dockerfile --target axum-perf-server ."
+[tasks."docker:perf-arm64:ntex-perf-server"]
+description = "Build perf ARM64 ntex-perf-server image"
+run = "docker build --provenance=false -t ntex-perf-server:perf-arm64 -f docker/tokio.perf.arm64.Dockerfile --target ntex-perf-server ."
 
 [tasks."docker:perf-arm64"]
-description = "Build perf ARM64 Docker images"
+description = "Build all perf ARM64 Docker images (profiling tools run on host)"
 depends = [
   "docker:perf-arm64:harrow-perf-server",
-  "docker:perf-arm64:axum-perf-server",
+  "docker:perf-arm64:ntex-perf-server",
 ]
 
 [tasks."docker:prod-arm64:harrow-server-monoio"]
@@ -174,6 +174,16 @@ run = "docker tag spinr:arm64 ${ECR}/harrow/load-generators:spinr-v${SPINR_VERSI
 description = "Push wrk3 to ECR"
 depends = ["bench:ecr-login"]
 run = "docker tag wrk3:arm64 ${ECR}/harrow/load-generators:wrk3-v${WRK3_VERSION} && docker push ${ECR}/harrow/load-generators:wrk3-v${WRK3_VERSION}"
+
+[tasks."bench:ecr-push:perf-harrow"]
+description = "Push perf harrow image to ECR"
+depends = ["bench:ecr-login"]
+run = "docker tag harrow-perf-server:perf-arm64 ${ECR}/harrow/harrow-perf-server:perf-${HARROW_VERSION} && docker push ${ECR}/harrow/harrow-perf-server:perf-${HARROW_VERSION}"
+
+[tasks."bench:ecr-push:perf-ntex"]
+description = "Push perf ntex image to ECR"
+depends = ["bench:ecr-login"]
+run = "docker tag ntex-perf-server:perf-arm64 ${ECR}/harrow/ntex-perf-server:perf-${HARROW_VERSION} && docker push ${ECR}/harrow/ntex-perf-server:perf-${HARROW_VERSION}"
 
 [tasks."bench:ecr-push-all"]
 description = "Push all bench images to ECR"

@@ -47,38 +47,26 @@ COPY harrow-server-meguri/src harrow-server-meguri/src
 COPY meguri/src meguri/src
 COPY harrow-bench/src harrow-bench/src
 
-# Pass 1: mimalloc (default features) — builds all deps + harrow-bench crate.
-RUN cargo build --locked --profile perf --target=aarch64-unknown-linux-gnu \
-        -p harrow-bench \
-        --bin harrow-perf-server --bin axum-perf-server && \
+ARG PERF_BINS="--bin harrow-perf-server --bin ntex-perf-server"
+ARG TARGET=aarch64-unknown-linux-gnu
+ARG PERF_DIR=/app/target/aarch64-unknown-linux-gnu/perf
+
+# Build with mimalloc (default features)
+RUN cargo build --locked --profile perf --target=${TARGET} \
+        -p harrow-bench ${PERF_BINS} && \
     mkdir -p /out/mimalloc && \
-    cp target/aarch64-unknown-linux-gnu/perf/harrow-perf-server /out/mimalloc/ && \
-    cp target/aarch64-unknown-linux-gnu/perf/axum-perf-server /out/mimalloc/
+    cp ${PERF_DIR}/harrow-perf-server /out/mimalloc/ && \
+    cp ${PERF_DIR}/ntex-perf-server /out/mimalloc/
 
-# Pass 2: system allocator — reuses dep cache, only recompiles harrow-bench crate.
-RUN cargo build --locked --profile perf --target=aarch64-unknown-linux-gnu \
-        -p harrow-bench --no-default-features \
-        --bin harrow-perf-server --bin axum-perf-server && \
-    mkdir -p /out/sysalloc && \
-    cp target/aarch64-unknown-linux-gnu/perf/harrow-perf-server /out/sysalloc/ && \
-    cp target/aarch64-unknown-linux-gnu/perf/axum-perf-server /out/sysalloc/
+# ---------------------------------------------------------------------------
+# Runtime images — distroless, profiling tools run on the host
+# (perf record -g -p <pid>, strace -c -f -p <pid>)
+# ---------------------------------------------------------------------------
 
-# --- harrow-perf-server (mimalloc) ---
 FROM gcr.io/distroless/cc-debian13:latest-arm64 AS harrow-perf-server
 COPY --from=build-env /out/mimalloc/harrow-perf-server /
 CMD ["/harrow-perf-server", "--bind", "0.0.0.0"]
 
-# --- axum-perf-server (mimalloc) ---
-FROM gcr.io/distroless/cc-debian13:latest-arm64 AS axum-perf-server
-COPY --from=build-env /out/mimalloc/axum-perf-server /
-CMD ["/axum-perf-server", "--bind", "0.0.0.0"]
-
-# --- harrow-perf-server-sysalloc (system allocator) ---
-FROM gcr.io/distroless/cc-debian13:latest-arm64 AS harrow-perf-server-sysalloc
-COPY --from=build-env /out/sysalloc/harrow-perf-server /
-CMD ["/harrow-perf-server", "--bind", "0.0.0.0"]
-
-# --- axum-perf-server-sysalloc (system allocator) ---
-FROM gcr.io/distroless/cc-debian13:latest-arm64 AS axum-perf-server-sysalloc
-COPY --from=build-env /out/sysalloc/axum-perf-server /
-CMD ["/axum-perf-server", "--bind", "0.0.0.0"]
+FROM gcr.io/distroless/cc-debian13:latest-arm64 AS ntex-perf-server
+COPY --from=build-env /out/mimalloc/ntex-perf-server /
+CMD ["/ntex-perf-server", "--bind", "0.0.0.0"]
