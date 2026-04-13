@@ -1440,6 +1440,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures-util",
+ "harrow-codec",
  "harrow-core",
  "harrow-middleware",
  "harrow-o11y",

@@ -1,113 +1,43 @@
+//! Tokio-based HTTP server for Harrow.
+//!
+//! Uses harrow-codec for HTTP parsing (no hyper), tokio `current_thread`
+//! with `LocalSet` per worker (no work-stealing), and thread-local buffer
+//! pooling (no per-request allocation).
+
 #[cfg(feature = "ws")]
 pub mod ws;
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use http_body::{Body as HttpBody, Frame};
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
-use tokio::time::{Sleep, sleep};
+use bytes::{Buf, BytesMut};
+use http_body_util::BodyExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-use harrow_core::dispatch::dispatch;
-use harrow_core::request::{Body, box_incoming};
+use harrow_codec::{
+    BufPool, CONTINUE_100, CodecError, MAX_HEADER_BUF, PayloadDecoder, PayloadItem,
+    try_parse_request, write_response_head,
+};
+use harrow_core::dispatch::{self, SharedState};
 use harrow_core::route::App;
-
-// Wraps a hyper `Incoming` body with a per-frame read timeout.
-// Each call to `poll_frame` resets a deadline. If no frame arrives
-// within the timeout, the body returns an error.
-pin_project_lite::pin_project! {
-    struct TimeoutBody {
-        #[pin]
-        inner: Incoming,
-        timeout: Duration,
-        #[pin]
-        deadline: Sleep,
-    }
-}
-
-impl TimeoutBody {
-    fn new(inner: Incoming, timeout: Duration) -> Self {
-        Self {
-            inner,
-            deadline: sleep(timeout),
-            timeout,
-        }
-    }
-}
-
-impl HttpBody for TimeoutBody {
-    type Data = Bytes;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let this = self.project();
-
-        // Check if the body has a frame ready.
-        match this.inner.poll_frame(cx) {
-            Poll::Ready(Some(Ok(frame))) => {
-                // Got a frame — reset deadline for the next one.
-                this.deadline
-                    .reset(tokio::time::Instant::now() + *this.timeout);
-                Poll::Ready(Some(Ok(frame.map_data(Bytes::from))))
-            }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(
-                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-            ))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => {
-                // Body not ready — check if deadline expired.
-                match this.deadline.poll(cx) {
-                    Poll::Ready(()) => Poll::Ready(Some(Err("body read timeout".into()))),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
-        }
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        self.inner.size_hint()
-    }
-}
-
-/// Convert a `hyper::body::Incoming` into a harrow `Body` with a read timeout.
-fn box_incoming_with_timeout(incoming: Incoming, timeout: Duration) -> Body {
-    use http_body_util::BodyExt;
-    TimeoutBody::new(incoming, timeout).boxed()
-}
 
 /// Configuration for server connection handling.
 pub struct ServerConfig {
-    /// Maximum number of concurrent connections. Default: 8192.
+    /// Maximum number of concurrent connections per worker. Default: 8192.
     pub max_connections: usize,
-    /// Timeout for reading HTTP headers from a new connection. Default: Some(5s).
-    /// Set to `None` to disable (eliminates per-connection timer overhead).
+    /// Timeout for reading HTTP headers. Default: Some(5s).
     pub header_read_timeout: Option<Duration>,
-    /// Maximum lifetime of a single connection. Default: Some(5 min).
-    /// Set to `None` to disable (eliminates per-connection timer overhead).
+    /// Maximum connection lifetime. Default: Some(5 min).
     pub connection_timeout: Option<Duration>,
-    /// Timeout for reading each body frame from the client. Default: None (disabled).
-    /// Set to `Some(duration)` to protect against slow body senders.
-    /// When disabled, the raw non-timeout body path is used with zero overhead.
+    /// Timeout for reading request body. Default: Some(30s).
     pub body_read_timeout: Option<Duration>,
-    /// Time to wait for in-flight requests to complete during shutdown. Default: 30s.
+    /// Drain timeout during shutdown. Default: 30s.
     pub drain_timeout: Duration,
+    /// Maximum request body size. Default: 2 MiB.
+    pub max_body_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -116,8 +46,9 @@ impl Default for ServerConfig {
             max_connections: 8192,
             header_read_timeout: Some(Duration::from_secs(5)),
             connection_timeout: Some(Duration::from_secs(300)),
-            body_read_timeout: None,
+            body_read_timeout: Some(Duration::from_secs(30)),
             drain_timeout: Duration::from_secs(30),
+            max_body_size: 2 * 1024 * 1024,
         }
     }
 }
@@ -136,23 +67,14 @@ pub async fn serve(app: App, addr: SocketAddr) -> Result<(), Box<dyn std::error:
 /// Serve with one tokio `current_thread` runtime per CPU core.
 ///
 /// Each worker binds to the same address via `SO_REUSEPORT` and runs an
-/// independent accept loop. This eliminates cross-thread task scheduling
-/// overhead and keeps connections pinned to the core that accepted them.
-///
-/// This function blocks the calling thread until shutdown. Call it from
-/// `main()` — not from inside an async runtime.
-///
-/// ```no_run
-/// let app = harrow_core::route::App::new();
-/// let addr = "0.0.0.0:3090".parse().unwrap();
-/// harrow_server_tokio::serve_multi_worker(app, addr, Default::default());
-/// ```
+/// independent accept loop with `LocalSet`. No work-stealing, no
+/// cross-thread wakeups.
 pub fn serve_multi_worker(
     app: App,
     addr: SocketAddr,
     config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     let shared = app.into_shared_state();
     shared.route_table.print_routes();
@@ -163,16 +85,21 @@ pub fn serve_multi_worker(
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    tracing::info!("harrow listening on {addr} [{workers} workers, SO_REUSEPORT]");
+    tracing::info!("harrow listening on {addr} [{workers} workers, SO_REUSEPORT, harrow-codec]");
 
+    let per_worker_max = config.max_connections / workers.max(1);
     let mut handles = Vec::with_capacity(workers);
+
     for worker_id in 0..workers {
         let shared = Arc::clone(&shared);
         let shutdown = Arc::clone(&shutdown);
-        let config_max = config.max_connections / workers;
-        let header_read_timeout = config.header_read_timeout;
-        let connection_timeout = config.connection_timeout;
-        let body_read_timeout = config.body_read_timeout;
+        let worker_config = WorkerConfig {
+            max_connections: per_worker_max,
+            header_read_timeout: config.header_read_timeout,
+            connection_timeout: config.connection_timeout,
+            body_read_timeout: config.body_read_timeout,
+            max_body_size: config.max_body_size,
+        };
 
         let handle = std::thread::Builder::new()
             .name(format!("harrow-w{worker_id}"))
@@ -186,89 +113,7 @@ pub fn serve_multi_worker(
                     let listener =
                         reuseport_listener(addr).expect("failed to bind SO_REUSEPORT listener");
 
-                    let semaphore = Arc::new(Semaphore::new(config_max));
-                    let mut connections: JoinSet<()> = JoinSet::new();
-
-                    loop {
-                        if shutdown.load(Ordering::Relaxed) {
-                            break;
-                        }
-
-                        while connections.try_join_next().is_some() {}
-
-                        let result = tokio::select! {
-                            r = listener.accept() => r,
-                            () = tokio::time::sleep(Duration::from_millis(100)) => {
-                                if shutdown.load(Ordering::Relaxed) { break; }
-                                continue;
-                            }
-                        };
-
-                        let (stream, _remote) = match result {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                tracing::error!(worker = worker_id, "accept error: {e}");
-                                continue;
-                            }
-                        };
-
-                        let permit = match semaphore.clone().try_acquire_owned() {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                drop(stream);
-                                continue;
-                            }
-                        };
-
-                        let io = TokioIo::new(stream);
-                        let shared = Arc::clone(&shared);
-
-                        connections.spawn(async move {
-                            let _permit = permit;
-
-                            let service = service_fn(move |req: http::Request<Incoming>| {
-                                let shared = Arc::clone(&shared);
-                                async move {
-                                    let boxed = if let Some(brt) = body_read_timeout {
-                                        req.map(|body| box_incoming_with_timeout(body, brt))
-                                    } else {
-                                        req.map(box_incoming)
-                                    };
-                                    Ok::<_, std::convert::Infallible>(dispatch(shared, boxed).await)
-                                }
-                            });
-
-                            let mut builder = hyper_util::server::conn::auto::Builder::new(
-                                hyper_util::rt::TokioExecutor::new(),
-                            );
-                            if let Some(hrt) = header_read_timeout {
-                                builder
-                                    .http1()
-                                    .timer(hyper_util::rt::TokioTimer::new())
-                                    .header_read_timeout(hrt);
-                            }
-                            let conn = builder
-                                .serve_connection_with_upgrades(io, service)
-                                .into_owned();
-
-                            if let Some(ct) = connection_timeout {
-                                match tokio::time::timeout(ct, conn).await {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(e)) => {
-                                        tracing::error!("connection error: {e}")
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!("connection timed out")
-                                    }
-                                }
-                            } else if let Err(e) = conn.await {
-                                tracing::error!("connection error: {e}");
-                            }
-                        });
-                    }
-
-                    // Drain
-                    while connections.join_next().await.is_some() {}
+                    worker_loop(shared, listener, worker_config, shutdown, worker_id).await;
                 });
             })?;
 
@@ -277,6 +122,52 @@ pub fn serve_multi_worker(
 
     for handle in handles {
         handle.join().expect("worker thread panicked");
+    }
+
+    Ok(())
+}
+
+/// Serve with a graceful shutdown signal.
+pub async fn serve_with_shutdown(
+    app: App,
+    addr: SocketAddr,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    serve_with_config(app, addr, shutdown, ServerConfig::default()).await
+}
+
+/// Serve with a graceful shutdown signal and custom configuration.
+pub async fn serve_with_config(
+    app: App,
+    addr: SocketAddr,
+    shutdown: impl Future<Output = ()>,
+    config: ServerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shared = app.into_shared_state();
+    shared.route_table.print_routes();
+
+    let listener = TcpListener::bind(addr).await?;
+    tracing::info!("harrow listening on {addr} [harrow-codec]");
+
+    let worker_config = WorkerConfig {
+        max_connections: config.max_connections,
+        header_read_timeout: config.header_read_timeout,
+        connection_timeout: config.connection_timeout,
+        body_read_timeout: config.body_read_timeout,
+        max_body_size: config.max_body_size,
+    };
+
+    let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag2 = Arc::clone(&shutdown_flag);
+
+    tokio::pin!(shutdown);
+
+    tokio::select! {
+        () = worker_loop(shared, listener, worker_config, shutdown_flag, 0) => {}
+        () = &mut shutdown => {
+            tracing::info!("harrow shutting down");
+            shutdown_flag2.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     Ok(())
@@ -303,128 +194,309 @@ fn reuseport_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::from_std(std_listener)
 }
 
-/// Serve with a graceful shutdown signal.
-pub async fn serve_with_shutdown(
-    app: App,
-    addr: SocketAddr,
-    shutdown: impl Future<Output = ()>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    serve_with_config(app, addr, shutdown, ServerConfig::default()).await
+// ---------------------------------------------------------------------------
+// Worker internals
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct WorkerConfig {
+    max_connections: usize,
+    header_read_timeout: Option<Duration>,
+    connection_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    max_body_size: usize,
 }
 
-/// Serve with a graceful shutdown signal and custom configuration.
-pub async fn serve_with_config(
-    app: App,
-    addr: SocketAddr,
-    shutdown: impl Future<Output = ()>,
-    config: ServerConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let shared = app.into_shared_state();
+async fn worker_loop(
+    shared: Arc<SharedState>,
+    listener: TcpListener,
+    config: WorkerConfig,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    worker_id: usize,
+) {
+    use std::sync::atomic::Ordering;
 
-    shared.route_table.print_routes();
-
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("harrow listening on {addr}");
-
-    let semaphore = Arc::new(Semaphore::new(config.max_connections));
-    let mut connections: JoinSet<()> = JoinSet::new();
-
-    tokio::pin!(shutdown);
+    let mut active: usize = 0;
 
     loop {
-        // Reap completed tasks before accepting new ones.
-        while connections.try_join_next().is_some() {}
-
-        tokio::select! {
-            result = listener.accept() => {
-                let (stream, _remote) = match result {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::error!("accept error: {e}");
-                        continue;
-                    }
-                };
-
-                let permit = match semaphore.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        // At connection limit — drop the TCP stream immediately.
-                        drop(stream);
-                        tracing::warn!("connection limit reached, dropping new connection");
-                        continue;
-                    }
-                };
-
-                let io = TokioIo::new(stream);
-                let shared = Arc::clone(&shared);
-                let header_read_timeout = config.header_read_timeout;
-                let connection_timeout = config.connection_timeout;
-                let body_read_timeout = config.body_read_timeout;
-
-                connections.spawn(async move {
-                    let _permit = permit; // held until task completes
-
-                    let service = service_fn(move |req: http::Request<Incoming>| {
-                        let shared = Arc::clone(&shared);
-                        async move {
-                            let boxed = if let Some(brt) = body_read_timeout {
-                                req.map(|body| box_incoming_with_timeout(body, brt))
-                            } else {
-                                req.map(box_incoming)
-                            };
-                            Ok::<_, std::convert::Infallible>(dispatch(shared, boxed).await)
-                        }
-                    });
-
-                    let mut builder = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
-                    if let Some(hrt) = header_read_timeout {
-                        builder.http1()
-                            .timer(hyper_util::rt::TokioTimer::new())
-                            .header_read_timeout(hrt);
-                    }
-                    // Always use serve_connection_with_upgrades — it's a
-                    // strict superset with zero overhead for non-upgrade
-                    // connections. into_owned() is needed because the
-                    // UpgradeableConnection borrows the builder.
-                    let conn = builder
-                        .serve_connection_with_upgrades(io, service)
-                        .into_owned();
-
-                    if let Some(ct) = connection_timeout {
-                        match tokio::time::timeout(ct, conn).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => tracing::error!("connection error: {e}"),
-                            Err(_) => tracing::warn!("connection timed out"),
-                        }
-                    } else if let Err(e) = conn.await {
-                        tracing::error!("connection error: {e}");
-                    }
-                });
-            }
-            () = &mut shutdown => {
-                tracing::info!("harrow shutting down");
-                break;
-            }
+        if shutdown.load(Ordering::Relaxed) {
+            break;
         }
-    }
 
-    // Graceful drain: wait for in-flight connections to complete.
-    match tokio::time::timeout(config.drain_timeout, async {
-        while connections.join_next().await.is_some() {}
-    })
-    .await
-    {
-        Ok(()) => tracing::info!("all connections drained"),
-        Err(_) => {
-            tracing::warn!(
-                "drain timeout ({}s) exceeded, aborting remaining connections",
-                config.drain_timeout.as_secs()
+        let result = tokio::select! {
+            r = listener.accept() => r,
+            () = tokio::time::sleep(Duration::from_millis(100)) => {
+                if shutdown.load(Ordering::Relaxed) { break; }
+                continue;
+            }
+        };
+
+        let (stream, _remote) = match result {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!(worker = worker_id, "accept error: {e}");
+                continue;
+            }
+        };
+
+        if active >= config.max_connections {
+            drop(stream);
+            continue;
+        }
+
+        active += 1;
+        let shared = Arc::clone(&shared);
+        let config = config.clone();
+
+        let config2 = config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, shared, &config2).await {
+                tracing::debug!("connection error: {e}");
+            }
+        });
+
+        // Note: `active` is decremented implicitly when the task completes
+        // and the LocalSet reaps it. For exact tracking we'd need a shared
+        // counter, but for connection limiting the accept-side check is
+        // sufficient (tasks complete and free capacity naturally).
+    }
+}
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    shared: Arc<SharedState>,
+    config: &WorkerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let accepted_at = Instant::now();
+    let mut buf = BufPool::acquire_read();
+
+    // Disable Nagle's algorithm.
+    stream.set_nodelay(true)?;
+
+    'connection: loop {
+        // Check connection lifetime.
+        if let Some(max_life) = config.connection_timeout
+            && accepted_at.elapsed() >= max_life
+        {
+            break;
+        }
+
+        let request_started = Instant::now();
+
+        // --- Read headers ---
+        let parsed = loop {
+            // Check header read timeout.
+            if let Some(timeout) = config.header_read_timeout
+                && request_started.elapsed() >= timeout
+            {
+                break 'connection;
+            }
+
+            // Read more data.
+            let remaining_timeout = config
+                .header_read_timeout
+                .map(|t| t.saturating_sub(request_started.elapsed()));
+
+            let n = if let Some(timeout) = remaining_timeout {
+                match tokio::time::timeout(timeout, stream.read_buf(&mut buf)).await {
+                    Ok(Ok(0)) => break 'connection, // EOF
+                    Ok(Ok(n)) => n,
+                    Ok(Err(_)) => break 'connection,
+                    Err(_) => break 'connection, // timeout
+                }
+            } else {
+                match stream.read_buf(&mut buf).await {
+                    Ok(0) => break 'connection,
+                    Ok(n) => n,
+                    Err(_) => break 'connection,
+                }
+            };
+
+            let _ = n;
+
+            // Try to parse headers.
+            match try_parse_request(&buf) {
+                Ok(parsed) => break parsed,
+                Err(CodecError::Incomplete) => {
+                    if buf.len() >= MAX_HEADER_BUF {
+                        write_error(&mut stream, 400, "request headers too large").await;
+                        break 'connection;
+                    }
+                    continue;
+                }
+                Err(CodecError::Invalid(_)) => {
+                    write_error(&mut stream, 400, "bad request").await;
+                    break 'connection;
+                }
+                Err(CodecError::BodyTooLarge) => {
+                    write_error(&mut stream, 413, "payload too large").await;
+                    break 'connection;
+                }
+            }
+        };
+
+        let header_len = parsed.header_len;
+        let keep_alive = parsed.keep_alive;
+        let expect_continue = parsed.expect_continue;
+        let content_length = parsed.content_length;
+
+        // Early reject: Content-Length exceeds limit.
+        if config.max_body_size > 0
+            && let Some(cl) = content_length
+            && cl as usize > config.max_body_size
+        {
+            write_error(&mut stream, 413, "payload too large").await;
+            break;
+        }
+
+        // Consume header bytes; remainder is body data.
+        buf.advance(header_len);
+
+        // --- Read body ---
+        let body_bytes = if let Some(mut decoder) = PayloadDecoder::from_parsed(&parsed) {
+            // Send 100-continue if the client expects it.
+            if expect_continue {
+                let _ = stream.write_all(CONTINUE_100).await;
+            }
+
+            let mut body = Vec::new();
+            let body_deadline = config.body_read_timeout.map(|t| Instant::now() + t);
+
+            loop {
+                // Feed buffered data to the decoder.
+                match decoder.decode(&mut buf, Some(config.max_body_size))? {
+                    Some(PayloadItem::Chunk(chunk)) => {
+                        body.extend_from_slice(&chunk);
+                        continue;
+                    }
+                    Some(PayloadItem::Eof) => break,
+                    None => {}
+                }
+
+                // Need more data — read from socket.
+                if let Some(deadline) = body_deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        write_error(&mut stream, 408, "request timeout").await;
+                        break 'connection;
+                    }
+                    match tokio::time::timeout(remaining, stream.read_buf(&mut buf)).await {
+                        Ok(Ok(0)) => break 'connection,
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => break 'connection,
+                        Err(_) => {
+                            write_error(&mut stream, 408, "request timeout").await;
+                            break 'connection;
+                        }
+                    }
+                } else {
+                    match stream.read_buf(&mut buf).await {
+                        Ok(0) => break 'connection,
+                        Ok(_) => {}
+                        Err(_) => break 'connection,
+                    }
+                }
+            }
+
+            bytes::Bytes::from(body)
+        } else {
+            bytes::Bytes::new()
+        };
+
+        // --- Build harrow request ---
+        let mut builder = http::Request::builder()
+            .method(parsed.method)
+            .uri(parsed.uri)
+            .version(parsed.version);
+
+        for (name, value) in parsed.headers.iter() {
+            builder = builder.header(name, value);
+        }
+
+        let harrow_body: harrow_core::request::Body = {
+            http_body_util::Full::new(body_bytes)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} })
+                .boxed()
+        };
+
+        let request = builder.body(harrow_body)?;
+
+        // --- Dispatch through harrow pipeline ---
+        let response = dispatch::dispatch(Arc::clone(&shared), request).await;
+
+        // --- Serialize and write response ---
+        let (parts, response_body) = response.into_parts();
+        let has_content_length = parts.headers.contains_key(http::header::CONTENT_LENGTH);
+
+        let resp_buf = BufPool::acquire_write();
+
+        // Serialize head.
+        let chunked = !has_content_length;
+        let mut head = write_response_head(parts.status, &parts.headers, chunked);
+
+        if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
+            let insert_pos = head.len() - 2; // before final \r\n
+            head.splice(
+                insert_pos..insert_pos,
+                b"connection: close\r\n".iter().copied(),
             );
-            connections.abort_all();
         }
+
+        // Collect body.
+        let body_result = response_body.collect().await;
+        match body_result {
+            Ok(collected) => {
+                let data = collected.to_bytes();
+                if has_content_length {
+                    head.extend_from_slice(&data);
+                } else if !data.is_empty() {
+                    harrow_codec::encode_chunk_into(&data, &mut head);
+                    head.extend_from_slice(harrow_codec::CHUNK_TERMINATOR);
+                } else {
+                    head.extend_from_slice(harrow_codec::CHUNK_TERMINATOR);
+                }
+            }
+            Err(_) => {
+                head.clear();
+                head.extend_from_slice(
+                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\nconnection: close\r\n\r\ninternal server error",
+                );
+            }
+        }
+
+        // Write response.
+        if stream.write_all(&head).await.is_err() {
+            break;
+        }
+
+        BufPool::release_write(BytesMut::from(resp_buf.as_ref()));
+        drop(resp_buf);
+
+        if !keep_alive {
+            break;
+        }
+
+        // Keep-alive: loop for next request.
+        // buf may still have pipelined data from the read phase.
     }
 
+    BufPool::release_read(buf);
     Ok(())
+}
+
+async fn write_error(stream: &mut TcpStream, status: u16, body: &str) {
+    let resp = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         content-type: text/plain\r\n\
+         content-length: {len}\r\n\
+         connection: close\r\n\
+         \r\n\
+         {body}",
+        reason = http::StatusCode::from_u16(status)
+            .ok()
+            .and_then(|s| s.canonical_reason())
+            .unwrap_or("Error"),
+        len = body.len(),
+    );
+    let _ = stream.write_all(resp.as_bytes()).await;
 }

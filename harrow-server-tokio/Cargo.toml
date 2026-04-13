@@ -5,27 +5,30 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Hyper server binding for Harrow: connection handling, graceful shutdown"
+description = "Tokio server backend for Harrow: custom HTTP codec, LocalSet per-worker, buffer pooling"
 
 [features]
 default = []
 tls = ["hyper-rustls", "rustls"]
-ws = ["harrow-core/ws", "dep:tokio-tungstenite"]
+ws = ["harrow-core/ws", "dep:tokio-tungstenite", "dep:hyper", "dep:hyper-util", "dep:http-body", "dep:pin-project-lite"]
 profiling = []
 
 [dependencies]
+harrow-codec = { workspace = true }
 harrow-core = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
-http-body = "1"
 http-body-util = { workspace = true }
-hyper = { workspace = true }
 futures-util = { workspace = true }
-hyper-util = { workspace = true }
-pin-project-lite = { workspace = true }
 tokio = { workspace = true }
 socket2 = { version = "0.5", features = ["all"] }
 tracing = { workspace = true }
+
+# WebSocket support pulls in hyper (needed for upgrade handshake)
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body = { version = "1", optional = true }
+pin-project-lite = { workspace = true, optional = true }
 
 # Optional TLS
 hyper-rustls = { version = "0.27", optional = true }

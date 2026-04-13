@@ -995,8 +995,8 @@ async fn tcp_body_read_timeout_returns_400() {
         .expect("read should succeed");
     let response = String::from_utf8_lossy(&buf[..n]);
     assert!(
-        response.contains("400") || response.contains("body read timeout"),
-        "expected 400 or timeout error, got: {response}"
+        response.contains("400") || response.contains("408") || response.contains("timeout"),
+        "expected 400/408 or timeout error, got: {response}"
     );
 }
 
