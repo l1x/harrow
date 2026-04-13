@@ -97,6 +97,7 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
     let mut headers = HeaderMap::with_capacity(parsed.headers.len());
     let mut content_length: Option<u64> = None;
     let mut chunked = false;
+    let mut seen_te = false;
     let mut conn_close = false;
     let mut conn_keep_alive = false;
     let mut expect_continue = false;
@@ -121,13 +122,22 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
             }
             content_length = Some(len);
         } else if name == TRANSFER_ENCODING {
-            if let Ok(s) = std::str::from_utf8(h.value) {
-                for token in s.split(',') {
-                    if token.trim().eq_ignore_ascii_case("chunked") {
-                        chunked = true;
+            // Reject duplicate TE headers (request smuggling vector).
+            if seen_te {
+                return Err(CodecError::Invalid(
+                    "duplicate transfer-encoding header".into(),
+                ));
+            }
+            seen_te = true;
+            // TE is only valid on HTTP/1.1 (HTTP/1.0 has no chunked encoding).
+            if version == Version::HTTP_11
+                && let Ok(s) = std::str::from_utf8(h.value) {
+                    for token in s.split(',') {
+                        if token.trim().eq_ignore_ascii_case("chunked") {
+                            chunked = true;
+                        }
                     }
                 }
-            }
         } else if name == CONNECTION {
             if let Ok(s) = std::str::from_utf8(h.value) {
                 for token in s.split(',') {
@@ -155,6 +165,17 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
     if content_length.is_some() && chunked {
         return Err(CodecError::Invalid(
             "content-length and transfer-encoding: chunked cannot be combined".into(),
+        ));
+    }
+
+    // HTTP/1.0 POST without Content-Length has indeterminate body length.
+    // Reject to prevent request smuggling (RFC 1945 §7.2.2).
+    if version == Version::HTTP_10
+        && (method == Method::POST || method == Method::PUT)
+        && content_length.is_none()
+    {
+        return Err(CodecError::Invalid(
+            "HTTP/1.0 POST/PUT requires content-length".into(),
         ));
     }
 
@@ -207,7 +228,8 @@ pub struct PayloadDecoder {
 #[derive(Debug, Clone, Copy)]
 enum PayloadKind {
     Length(u64),
-    Chunked(ChunkedState, u64),
+    /// (state, current_chunk_remaining, cumulative_decoded_bytes)
+    Chunked(ChunkedState, u64, u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +257,7 @@ impl PayloadDecoder {
     /// Create a decoder for a chunked transfer-encoded body.
     pub fn chunked() -> Self {
         Self {
-            kind: PayloadKind::Chunked(ChunkedState::Size, 0),
+            kind: PayloadKind::Chunked(ChunkedState::Size, 0, 0),
         }
     }
 
@@ -260,7 +282,7 @@ impl PayloadDecoder {
     pub fn is_eof(&self) -> bool {
         matches!(
             self.kind,
-            PayloadKind::Length(0) | PayloadKind::Chunked(ChunkedState::End, _)
+            PayloadKind::Length(0) | PayloadKind::Chunked(ChunkedState::End, _, _)
         )
     }
 
@@ -295,7 +317,7 @@ impl PayloadDecoder {
                 };
                 Ok(Some(PayloadItem::Chunk(chunk.freeze())))
             }
-            PayloadKind::Chunked(state, size) => loop {
+            PayloadKind::Chunked(state, size, decoded_total) => loop {
                 let mut chunk = None;
                 match state.step(src, size, &mut chunk) {
                     Poll::Pending => return Ok(None),
@@ -310,8 +332,9 @@ impl PayloadDecoder {
                 }
 
                 if let Some(body_chunk) = chunk {
+                    *decoded_total += body_chunk.len() as u64;
                     if let Some(limit) = max_body
-                        && body_chunk.len() > limit {
+                        && *decoded_total > limit as u64 {
                             return Err(CodecError::BodyTooLarge);
                         }
                     return Ok(Some(PayloadItem::Chunk(body_chunk)));
@@ -338,10 +361,30 @@ impl ChunkedState {
             ChunkedState::Extension => Self::read_extension(src),
             ChunkedState::SizeLf => Self::read_size_lf(src, size),
             ChunkedState::Body => Self::read_body(src, size, chunk),
-            ChunkedState::BodyCr => Self::read_body_cr(src),
-            ChunkedState::BodyLf => Self::read_body_lf(src),
-            ChunkedState::EndCr => Self::read_end_cr(src),
-            ChunkedState::EndLf => Self::read_end_lf(src),
+            ChunkedState::BodyCr => Self::expect_byte(
+                src,
+                b'\r',
+                ChunkedState::BodyLf,
+                "expected CR after chunk body",
+            ),
+            ChunkedState::BodyLf => Self::expect_byte(
+                src,
+                b'\n',
+                ChunkedState::Size,
+                "expected LF after chunk body",
+            ),
+            ChunkedState::EndCr => Self::expect_byte(
+                src,
+                b'\r',
+                ChunkedState::EndLf,
+                "expected CR at end of chunked stream",
+            ),
+            ChunkedState::EndLf => Self::expect_byte(
+                src,
+                b'\n',
+                ChunkedState::End,
+                "expected LF at end of chunked stream",
+            ),
             ChunkedState::End => Poll::Ready(Ok(ChunkedState::End)),
         }
     }
@@ -440,51 +483,21 @@ impl ChunkedState {
         }
     }
 
-    fn read_body_cr(src: &mut BytesMut) -> Poll<Result<ChunkedState, &'static str>> {
+    fn expect_byte(
+        src: &mut BytesMut,
+        expected: u8,
+        next: ChunkedState,
+        err: &'static str,
+    ) -> Poll<Result<ChunkedState, &'static str>> {
         if src.is_empty() {
             return Poll::Pending;
         }
         let b = src[0];
         src.advance(1);
-        match b {
-            b'\r' => Poll::Ready(Ok(ChunkedState::BodyLf)),
-            _ => Poll::Ready(Err("expected CR after chunk body")),
-        }
-    }
-
-    fn read_body_lf(src: &mut BytesMut) -> Poll<Result<ChunkedState, &'static str>> {
-        if src.is_empty() {
-            return Poll::Pending;
-        }
-        let b = src[0];
-        src.advance(1);
-        match b {
-            b'\n' => Poll::Ready(Ok(ChunkedState::Size)),
-            _ => Poll::Ready(Err("expected LF after chunk body CR")),
-        }
-    }
-
-    fn read_end_cr(src: &mut BytesMut) -> Poll<Result<ChunkedState, &'static str>> {
-        if src.is_empty() {
-            return Poll::Pending;
-        }
-        let b = src[0];
-        src.advance(1);
-        match b {
-            b'\r' => Poll::Ready(Ok(ChunkedState::EndLf)),
-            _ => Poll::Ready(Err("expected CR at end of chunked stream")),
-        }
-    }
-
-    fn read_end_lf(src: &mut BytesMut) -> Poll<Result<ChunkedState, &'static str>> {
-        if src.is_empty() {
-            return Poll::Pending;
-        }
-        let b = src[0];
-        src.advance(1);
-        match b {
-            b'\n' => Poll::Ready(Ok(ChunkedState::End)),
-            _ => Poll::Ready(Err("expected LF at end of chunked stream")),
+        if b == expected {
+            Poll::Ready(Ok(next))
+        } else {
+            Poll::Ready(Err(err))
         }
     }
 }
@@ -727,6 +740,73 @@ mod tests {
     fn connection_tokens_comma_separated() {
         let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive, upgrade\r\n\r\n";
         assert!(try_parse_request(req).unwrap().keep_alive);
+    }
+
+    // --- Security: request smuggling prevention ---
+
+    #[test]
+    fn reject_duplicate_transfer_encoding() {
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn ignore_transfer_encoding_on_http10() {
+        let req = b"POST /data HTTP/1.0\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
+        let parsed = try_parse_request(req).unwrap();
+        assert!(!parsed.chunked);
+        assert_eq!(parsed.content_length, Some(5));
+    }
+
+    #[test]
+    fn reject_http10_post_without_content_length() {
+        let req = b"POST /data HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_http10_put_without_content_length() {
+        let req = b"PUT /data HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn allow_http10_get_without_content_length() {
+        let req = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        try_parse_request(req).unwrap();
+    }
+
+    #[test]
+    fn payload_chunked_cumulative_max_body() {
+        // 3 chunks of 5 bytes each = 15 bytes total, limit is 10
+        let mut buf =
+            BytesMut::from(&b"5\r\nhello\r\n5\r\nworld\r\n5\r\nagain\r\n0\r\n\r\n"[..]);
+        let mut dec = PayloadDecoder::chunked();
+
+        // First chunk (5 bytes) — OK
+        match dec.decode(&mut buf, Some(10)).unwrap().unwrap() {
+            PayloadItem::Chunk(c) => assert_eq!(c.len(), 5),
+            _ => panic!("expected Chunk"),
+        }
+        // Second chunk (cumulative 10 bytes) — OK
+        match dec.decode(&mut buf, Some(10)).unwrap().unwrap() {
+            PayloadItem::Chunk(c) => assert_eq!(c.len(), 5),
+            _ => panic!("expected Chunk"),
+        }
+        // Third chunk (cumulative 15 bytes) — exceeds limit
+        assert!(matches!(
+            dec.decode(&mut buf, Some(10)),
+            Err(CodecError::BodyTooLarge)
+        ));
     }
 
     // --- PayloadDecoder: Content-Length ---
