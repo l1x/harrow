@@ -10,6 +10,14 @@
 //!
 //! [`PayloadDecoder`] tracks its position across calls, so incremental
 //! recv completions are O(n) total — no re-scanning from the start.
+//!
+//! # Buffer pool
+//!
+//! [`BufPool`] provides thread-local buffer reuse to eliminate
+//! per-request allocations.
+
+pub mod buf_pool;
+pub use buf_pool::BufPool;
 
 use std::io::Write as _;
 use std::task::Poll;
@@ -131,13 +139,14 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
             seen_te = true;
             // TE is only valid on HTTP/1.1 (HTTP/1.0 has no chunked encoding).
             if version == Version::HTTP_11
-                && let Ok(s) = std::str::from_utf8(h.value) {
-                    for token in s.split(',') {
-                        if token.trim().eq_ignore_ascii_case("chunked") {
-                            chunked = true;
-                        }
+                && let Ok(s) = std::str::from_utf8(h.value)
+            {
+                for token in s.split(',') {
+                    if token.trim().eq_ignore_ascii_case("chunked") {
+                        chunked = true;
                     }
                 }
+            }
         } else if name == CONNECTION {
             if let Ok(s) = std::str::from_utf8(h.value) {
                 for token in s.split(',') {
@@ -334,9 +343,10 @@ impl PayloadDecoder {
                 if let Some(body_chunk) = chunk {
                     *decoded_total += body_chunk.len() as u64;
                     if let Some(limit) = max_body
-                        && *decoded_total > limit as u64 {
-                            return Err(CodecError::BodyTooLarge);
-                        }
+                        && *decoded_total > limit as u64
+                    {
+                        return Err(CodecError::BodyTooLarge);
+                    }
                     return Ok(Some(PayloadItem::Chunk(body_chunk)));
                 }
 
@@ -788,8 +798,7 @@ mod tests {
     #[test]
     fn payload_chunked_cumulative_max_body() {
         // 3 chunks of 5 bytes each = 15 bytes total, limit is 10
-        let mut buf =
-            BytesMut::from(&b"5\r\nhello\r\n5\r\nworld\r\n5\r\nagain\r\n0\r\n\r\n"[..]);
+        let mut buf = BytesMut::from(&b"5\r\nhello\r\n5\r\nworld\r\n5\r\nagain\r\n0\r\n\r\n"[..]);
         let mut dec = PayloadDecoder::chunked();
 
         // First chunk (5 bytes) — OK
