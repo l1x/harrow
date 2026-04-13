@@ -71,6 +71,13 @@
   failed_when: false
   when: inventory_hostname in groups['server']
 
+- name: Tag harrow-perf-server as latest (orchestrator default)
+  ansible.builtin.command:
+    cmd: "docker tag {{ ecr_registry }}/harrow/harrow-perf-server:perf-{{ harrow_version }} harrow-perf-server:latest"
+  changed_when: true
+  failed_when: false
+  when: inventory_hostname in groups['server']
+
 - name: Pull ntex-perf-server from ECR
   ansible.builtin.command:
     cmd: "docker pull {{ ecr_registry }}/harrow/ntex-perf-server:perf-{{ harrow_version }}"
@@ -85,6 +92,13 @@
   failed_when: false
   when: inventory_hostname in groups['server']
 
+- name: Tag ntex-perf-server as latest (orchestrator default)
+  ansible.builtin.command:
+    cmd: "docker tag {{ ecr_registry }}/harrow/ntex-perf-server:perf-{{ harrow_version }} ntex-perf-server:latest"
+  changed_when: true
+  failed_when: false
+  when: inventory_hostname in groups['server']
+
 # Client: pull load testers
 - name: Pull spinr from ECR
   ansible.builtin.command:
@@ -95,6 +109,12 @@
 - name: Tag spinr for local use
   ansible.builtin.command:
     cmd: "docker tag {{ ecr_registry }}/harrow/spinr:{{ spinr_version }} spinr:arm64-{{ spinr_version }}"
+  changed_when: true
+  when: inventory_hostname in groups['client']
+
+- name: Tag spinr as latest (orchestrator default)
+  ansible.builtin.command:
+    cmd: "docker tag {{ ecr_registry }}/harrow/spinr:{{ spinr_version }} spinr:latest"
   changed_when: true
   when: inventory_hostname in groups['client']
 
