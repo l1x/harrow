@@ -32,7 +32,7 @@
 compile_error!("harrow-server-meguri requires Linux. io_uring is not available on this platform.");
 
 #[cfg(target_os = "linux")]
-use harrow_codec as codec;
+use harrow_codec_h1 as codec;
 #[cfg(target_os = "linux")]
 mod connection;
 

@@ -43,9 +43,9 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Must not panic.
-    let _ = harrow_codec::write_response_head(code, &headers, false);
-    let _ = harrow_codec::write_response_head(code, &headers, true);
+    let _ = harrow_codec_h1::write_response_head(code, &headers, false);
+    let _ = harrow_codec_h1::write_response_head(code, &headers, true);
 
     let mut buf = Vec::new();
-    harrow_codec::write_response_head_into(code, &headers, false, &mut buf);
+    harrow_codec_h1::write_response_head_into(code, &headers, false, &mut buf);
 });

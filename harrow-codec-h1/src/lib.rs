@@ -319,9 +319,10 @@ impl PayloadDecoder {
                 }
                 // Check max_body against the total Content-Length.
                 if let Some(limit) = max_body
-                    && *remaining > limit as u64 {
-                        return Err(CodecError::BodyTooLarge);
-                    }
+                    && *remaining > limit as u64
+                {
+                    return Err(CodecError::BodyTooLarge);
+                }
                 if src.is_empty() {
                     return Ok(None);
                 }

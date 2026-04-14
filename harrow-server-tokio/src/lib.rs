@@ -1,6 +1,6 @@
 //! Tokio-based HTTP server for Harrow.
 //!
-//! Uses harrow-codec for HTTP parsing (no hyper), tokio `current_thread`
+//! Uses harrow-codec-h1 for HTTP parsing (no hyper), tokio `current_thread`
 //! per worker (no work-stealing), and thread-local buffer pooling
 //! (no per-request allocation).
 
@@ -17,7 +17,7 @@ use http_body_util::BodyExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use harrow_codec::{
+use harrow_codec_h1::{
     BufPool, CONTINUE_100, CodecError, MAX_HEADER_BUF, PayloadDecoder, PayloadItem,
     try_parse_request, write_response_head,
 };
@@ -85,7 +85,7 @@ pub fn serve_multi_worker(
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    tracing::info!("harrow listening on {addr} [{workers} workers, SO_REUSEPORT, harrow-codec]");
+    tracing::info!("harrow listening on {addr} [{workers} workers, SO_REUSEPORT, harrow-codec-h1]");
 
     let per_worker_max = config.max_connections / workers.max(1);
     let mut handles = Vec::with_capacity(workers);
@@ -147,7 +147,7 @@ pub async fn serve_with_config(
     shared.route_table.print_routes();
 
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!("harrow listening on {addr} [harrow-codec]");
+    tracing::info!("harrow listening on {addr} [harrow-codec-h1]");
 
     let worker_config = WorkerConfig {
         max_connections: config.max_connections,
@@ -454,10 +454,10 @@ where
                 if has_content_length {
                     head.extend_from_slice(&data);
                 } else if !data.is_empty() {
-                    harrow_codec::encode_chunk_into(&data, &mut head);
-                    head.extend_from_slice(harrow_codec::CHUNK_TERMINATOR);
+                    harrow_codec_h1::encode_chunk_into(&data, &mut head);
+                    head.extend_from_slice(harrow_codec_h1::CHUNK_TERMINATOR);
                 } else {
-                    head.extend_from_slice(harrow_codec::CHUNK_TERMINATOR);
+                    head.extend_from_slice(harrow_codec_h1::CHUNK_TERMINATOR);
                 }
             }
             Err(_) => {

@@ -2,7 +2,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use bytes::BytesMut;
-use harrow_codec::{PayloadDecoder, PayloadItem};
+use harrow_codec_h1::{PayloadDecoder, PayloadItem};
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz the stateful chunked decoder with incremental feeding.

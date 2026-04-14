@@ -14,7 +14,7 @@ ws = ["harrow-core/ws", "dep:tokio-tungstenite", "dep:hyper", "dep:hyper-util", 
 profiling = []
 
 [dependencies]
-harrow-codec = { workspace = true }
+harrow-codec-h1 = { workspace = true }
 harrow-core = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }

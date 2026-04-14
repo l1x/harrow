@@ -1,5 +1,5 @@
 [package]
-name = "harrow-codec-fuzz"
+name = "harrow-codec-h1-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-harrow-codec = { path = ".." }
+harrow-codec-h1 = { path = ".." }
 bytes = "1"
 http = "1"
 
