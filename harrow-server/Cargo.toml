@@ -9,4 +9,3 @@ description = "Shared server primitives for Harrow: listener, workers, shutdown,
 
 [dependencies]
 socket2 = { version = "0.5", features = ["all"] }
-tracing = { workspace = true }

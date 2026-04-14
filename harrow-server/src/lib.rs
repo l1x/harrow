@@ -45,13 +45,14 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Resolve the number of worker threads.
+    /// Resolve the number of worker threads.
+    /// `None` or `Some(0)` auto-detects from CPU count.
     pub fn worker_count(&self) -> usize {
         match self.workers {
-            Some(0) => 1,
-            Some(n) => n,
-            None => std::thread::available_parallelism()
+            Some(0) | None => std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
+            Some(n) => n,
         }
     }
 
@@ -115,12 +116,12 @@ pub fn reuseport_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpList
 }
 
 /// Spawn N worker threads, each calling `worker_fn` with a worker ID.
-/// Returns the join handles.
+/// Returns the join handles, or an error if any thread fails to spawn.
 pub fn spawn_workers<F>(
     count: usize,
     name_prefix: &str,
     worker_fn: F,
-) -> Vec<std::thread::JoinHandle<()>>
+) -> std::io::Result<Vec<std::thread::JoinHandle<()>>>
 where
     F: Fn(usize) + Send + Clone + 'static,
 {
@@ -130,11 +131,10 @@ where
         let name = format!("{name_prefix}{worker_id}");
         let handle = std::thread::Builder::new()
             .name(name)
-            .spawn(move || f(worker_id))
-            .expect("failed to spawn worker thread");
+            .spawn(move || f(worker_id))?;
         handles.push(handle);
     }
-    handles
+    Ok(handles)
 }
 
 /// Join all worker threads. Returns the first panic error if any.
@@ -193,7 +193,8 @@ mod tests {
         let c = counter.clone();
         let handles = spawn_workers(4, "test-w", move |_id| {
             c.fetch_add(1, Ordering::Relaxed);
-        });
+        })
+        .unwrap();
         join_workers(handles).unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }

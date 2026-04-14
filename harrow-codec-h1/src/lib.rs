@@ -130,20 +130,26 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
             }
             content_length = Some(len);
         } else if name == TRANSFER_ENCODING {
-            // Reject duplicate TE headers (request smuggling vector).
             if seen_te {
                 return Err(CodecError::Invalid(
                     "duplicate transfer-encoding header".into(),
                 ));
             }
             seen_te = true;
-            // TE is only valid on HTTP/1.1 (HTTP/1.0 has no chunked encoding).
             if version == Version::HTTP_11
                 && let Ok(s) = std::str::from_utf8(h.value)
             {
+                // Parse all tokens. Only "chunked" is supported.
+                // Reject unsupported codings (e.g., "gzip") to prevent
+                // request smuggling from framing disagreements.
                 for token in s.split(',') {
-                    if token.trim().eq_ignore_ascii_case("chunked") {
+                    let token = token.trim();
+                    if token.eq_ignore_ascii_case("chunked") {
                         chunked = true;
+                    } else if !token.eq_ignore_ascii_case("identity") && !token.is_empty() {
+                        return Err(CodecError::Invalid(format!(
+                            "unsupported transfer-encoding: {token}"
+                        )));
                     }
                 }
             }
@@ -171,9 +177,12 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
 
     let keep_alive = should_keep_alive(version, conn_close, conn_keep_alive);
 
-    if content_length.is_some() && chunked {
+    // RFC 9110 §6.3: reject any request with both Content-Length and
+    // Transfer-Encoding, not just chunked. Different hops may disagree
+    // on which framing to use.
+    if content_length.is_some() && seen_te {
         return Err(CodecError::Invalid(
-            "content-length and transfer-encoding: chunked cannot be combined".into(),
+            "content-length and transfer-encoding cannot be combined".into(),
         ));
     }
 
@@ -751,10 +760,21 @@ mod tests {
     }
 
     #[test]
-    fn chunked_in_comma_list() {
+    fn chunked_in_comma_list_with_identity() {
+        // "identity, chunked" is valid — identity is the only supported non-chunked coding.
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity, chunked\r\n\r\n";
+        assert!(try_parse_request(req).unwrap().chunked);
+    }
+
+    #[test]
+    fn reject_unsupported_transfer_encoding() {
+        // "gzip, chunked" is rejected because gzip is not supported.
         let req =
             b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
-        assert!(try_parse_request(req).unwrap().chunked);
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -775,11 +795,21 @@ mod tests {
     }
 
     #[test]
-    fn ignore_transfer_encoding_on_http10() {
+    fn reject_transfer_encoding_with_content_length() {
+        // Any TE + CL combination is rejected (RFC 9110 §6.3).
         let req = b"POST /data HTTP/1.0\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn transfer_encoding_ignored_on_http10() {
+        // HTTP/1.0 TE without CL — TE is ignored, no body.
+        let req = b"GET / HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
         let parsed = try_parse_request(req).unwrap();
         assert!(!parsed.chunked);
-        assert_eq!(parsed.content_length, Some(5));
     }
 
     #[test]

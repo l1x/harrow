@@ -200,7 +200,10 @@ impl Conn {
                 &self.body_bytes,
                 (max_body > 0).then_some(max_body),
             ) {
-                Ok(Some((body, _consumed))) => {
+                Ok(Some((body, consumed))) => {
+                    // Preserve pipelined data after the chunked body.
+                    let remaining = self.body_bytes.split_off(consumed);
+                    self.buf = remaining;
                     self.body_bytes = BytesMut::from(&body[..]);
                     if let Some(ref parsed) = self.parsed {
                         self.keep_alive = parsed.keep_alive;
@@ -236,6 +239,11 @@ impl Conn {
         };
 
         if target == 0 || self.body_bytes.len() >= target {
+            // Split exactly at target — any excess is pipelined data.
+            if target > 0 && self.body_bytes.len() > target {
+                let remaining = self.body_bytes.split_off(target);
+                self.buf = remaining;
+            }
             if let Some(ref parsed) = self.parsed {
                 self.keep_alive = parsed.keep_alive;
             }

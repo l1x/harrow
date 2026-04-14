@@ -78,7 +78,7 @@ pub fn serve_multi_worker(
                 worker_loop(shared, listener, &config, shutdown, worker_id).await;
             });
         }
-    });
+    })?;
 
     harrow_server::join_workers(handles).map_err(|e| -> Box<dyn std::error::Error> { e.into() })
 }
