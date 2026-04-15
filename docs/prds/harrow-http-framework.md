@@ -1,4 +1,4 @@
-# Harrow: A Thin, Macro-Free HTTP Framework over Hyper
+# Harrow: A Thin, Macro-Free HTTP Framework
 
 **Status:** Draft
 **Date:** 2026-02-19
@@ -15,7 +15,7 @@ Axum, the dominant Rust HTTP framework built on Hyper, introduces several pain p
 - **Observability is bolted on.** Tracing, metrics, and health checks require layering Tower middleware, often with boilerplate that varies per project. There is no unified o11y story out of the box.
 - **Abstraction cost.** Tower's `Service` trait, `Layer` composition, `BoxCloneService`, and the resulting deep type nesting add compile-time and cognitive overhead that is not justified for many services.
 
-Harrow aims to be the framework you reach for when you want Hyper's raw performance with a thin, explicit, zero-macro API surface that treats observability and route introspection as first-class features.
+Harrow aims to be the framework you reach for when you want top-tier Rust HTTP performance with a thin, explicit, zero-macro API surface that treats observability and route introspection as first-class features.
 
 ---
 
@@ -62,9 +62,9 @@ Harrow aims to be the framework you reach for when you want Hyper's raw performa
   Incoming              │  │  (Vec<Route>)       │   │
   HTTP request          │  │  - method           │   │
   ──────────────►       │  │  - path pattern     │   │
-  hyper::conn::auto     │  │  - handler fn       │   │
-                        │  │  - metadata         │   │
-                        │  └────────┬───────────┘   │
+  server backend        │  │  - handler fn       │   │
+  (tokio / monoio /     │  │  - metadata         │   │
+   future shared H1)    │  └────────┬───────────┘   │
                         │           │               │
                         │  ┌────────▼───────────┐   │
                         │  │   MiddlewareChain   │   │
@@ -79,6 +79,9 @@ Harrow aims to be the framework you reach for when you want Hyper's raw performa
                         │  └────────────────────┘   │
                         └──────────────────────────┘
 ```
+
+Detailed transport/backend architecture is documented separately in
+[`docs/h1-dispatcher-design.md`](../h1-dispatcher-design.md).
 
 ### 4.1 Core Types
 
@@ -310,7 +313,7 @@ Current v0.1 behavior terminates in-flight requests immediately.
 harrow/
   harrow-core/       # Route table, Request/Response wrappers, middleware trait
   harrow-o11y/       # Tracing + metrics integration (optional feature)
-  harrow-server-tokio/     # Hyper binding, connection handling, graceful shutdown
+  harrow-server-tokio/     # Tokio backend, HTTP/1 connection handling, graceful shutdown
   harrow-bench/      # Criterion benches, remote perf capture, summary rendering
   harrow/            # Facade crate re-exporting everything
 ```
@@ -322,7 +325,7 @@ Feature flags on the facade crate:
 | `o11y` | off | First-party observability wiring: tracing spans, request IDs, and `O11yConfig` integration |
 | `json` | on | `serde_json` body parsing/response helpers |
 | `tls` | off | rustls integration |
-| `http2` | on | HTTP/2 support via hyper |
+| `http2` | planned | HTTP/2 support via a future backend-specific implementation |
 | `profiling` | off | Adds `#[inline(never)]` markers on key functions for cleaner flamegraph frames |
 
 ---

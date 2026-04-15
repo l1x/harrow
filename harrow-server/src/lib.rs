@@ -45,7 +45,6 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Resolve the number of worker threads.
-    /// Resolve the number of worker threads.
     /// `None` or `Some(0)` auto-detects from CPU count.
     pub fn worker_count(&self) -> usize {
         match self.workers {
@@ -59,7 +58,7 @@ impl ServerConfig {
     /// Compute per-worker max connections.
     pub fn per_worker_max_connections(&self) -> usize {
         let workers = self.worker_count();
-        (self.max_connections / workers.max(1)).max(1)
+        self.max_connections.div_ceil(workers.max(1)).max(1)
     }
 }
 
@@ -177,6 +176,15 @@ mod tests {
         let mut config = ServerConfig::default();
         config.workers = Some(4);
         assert_eq!(config.per_worker_max_connections(), 2048);
+    }
+
+    #[test]
+    fn per_worker_max_connections_rounds_up() {
+        let mut config = ServerConfig::default();
+        config.max_connections = 8192;
+        config.workers = Some(3);
+        assert_eq!(config.per_worker_max_connections(), 2731);
+        assert!(config.per_worker_max_connections() * 3 >= config.max_connections);
     }
 
     #[test]

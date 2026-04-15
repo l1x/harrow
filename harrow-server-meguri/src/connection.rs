@@ -296,24 +296,21 @@ impl Conn {
     /// tokio runtime context during dispatch).
     pub fn set_response(
         &mut self,
-        parts: http::response::Parts,
+        mut parts: http::response::Parts,
         body_data: Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>,
     ) {
         let has_content_length = parts.headers.contains_key(http::header::CONTENT_LENGTH);
         let keep_alive = self.keep_alive;
 
+        if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
+            parts.headers.insert(
+                http::header::CONNECTION,
+                http::HeaderValue::from_static("close"),
+            );
+        }
+
         let mut head =
             codec::write_response_head(parts.status, &parts.headers, !has_content_length);
-
-        if !keep_alive {
-            // Ensure Connection: close is present.
-            if !parts.headers.contains_key(http::header::CONNECTION) {
-                // Append before final \r\n.
-                let close_hdr = b"connection: close\r\n";
-                let final_crlf_pos = head.len() - 2;
-                head.splice(final_crlf_pos..final_crlf_pos, close_hdr.iter().copied());
-            }
-        }
 
         match body_data {
             Ok(data) => {
@@ -547,6 +544,24 @@ mod tests {
         let result = conn.on_write(5);
         assert!(matches!(result, WriteResult::WriteMore));
         assert_eq!(conn.response_written, 5);
+    }
+
+    #[test]
+    fn set_response_inserts_connection_close_before_serializing() {
+        let mut conn = new_conn();
+        conn.keep_alive = false;
+        let parts = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        conn.set_response(parts, Ok(bytes::Bytes::new()));
+
+        let response = String::from_utf8_lossy(&conn.response_buf);
+        assert!(response.contains("connection: close\r\n"));
+        assert!(response.contains("transfer-encoding: chunked\r\n"));
     }
 
     // --- EOF ---
