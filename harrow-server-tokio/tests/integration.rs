@@ -18,12 +18,6 @@ use harrow_middleware::session::{Session, SessionConfig, SessionStore, session_m
 use harrow_o11y::O11yConfig;
 use http::StatusCode;
 
-// HTTP/2 h2c imports
-use bytes::Bytes;
-use http_body_util::{BodyExt, Empty};
-use hyper::client::conn::http2 as h2_client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-
 /// Shared counter used as application state.
 struct HitCounter(AtomicUsize);
 
@@ -285,6 +279,52 @@ fn decode_chunked(raw: &str) -> String {
         }
     }
     result
+}
+
+fn parse_raw_http_response(raw: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let head_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| idx + 4)
+        .unwrap_or(raw.len());
+    let head = String::from_utf8_lossy(&raw[..head_end.saturating_sub(4)]);
+    let body = raw[head_end..].to_vec();
+
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or("");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, ": ");
+            let key = parts.next()?.to_lowercase();
+            let val = parts.next()?.to_string();
+            Some((key, val))
+        })
+        .collect();
+
+    (status, headers, body)
+}
+
+async fn raw_http_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    parse_raw_http_response(&buf)
 }
 
 fn header_val<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -947,6 +987,53 @@ async fn tcp_graceful_drain_completes_inflight_request() {
     assert_eq!(body, "slow");
 }
 
+#[tokio::test]
+async fn tcp_graceful_shutdown_waits_for_drain_before_returning() {
+    let app = App::new().get("/slow", slow_handler);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        harrow_server_tokio::serve_with_config(
+            app,
+            addr,
+            async {
+                let _ = rx.await;
+            },
+            harrow_server_tokio::ServerConfig {
+                drain_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let request = tokio::spawn(async move { http_get(addr, "/slow").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = tx.send(());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !server.is_finished(),
+        "server future returned before in-flight request drained"
+    );
+
+    let (status, _, body) = request.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "slow");
+
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server should finish after in-flight request drains")
+        .unwrap();
+}
+
 // -- Body Read Timeout Test -------------------------------------------------
 
 #[tokio::test]
@@ -1012,6 +1099,148 @@ async fn tcp_head_returns_get_headers_without_body() {
         header_val(&headers, "content-type").is_some(),
         "HEAD response should preserve Content-Type"
     );
+}
+
+#[tokio::test]
+async fn tcp_head_response_is_not_chunked_on_wire() {
+    let app = App::new().get("/hello", hello);
+    let addr = start_server(app).await;
+
+    let (status, headers, body) = raw_http_request(addr, "HEAD", "/hello").await;
+    assert_eq!(status, 200);
+    assert_eq!(header_val(&headers, "transfer-encoding"), None);
+    assert!(body.is_empty(), "HEAD response should not write body bytes");
+}
+
+#[tokio::test]
+async fn tcp_204_and_304_responses_are_bodyless_on_wire() {
+    let app = App::new()
+        .get("/no-content", |_req: Request| async move {
+            Response::text("hidden").status(StatusCode::NO_CONTENT.as_u16())
+        })
+        .get("/not-modified", |_req: Request| async move {
+            Response::text("hidden").status(StatusCode::NOT_MODIFIED.as_u16())
+        });
+    let addr = start_server(app).await;
+
+    for (path, expected_status) in [
+        ("/no-content", StatusCode::NO_CONTENT),
+        ("/not-modified", StatusCode::NOT_MODIFIED),
+    ] {
+        let (status, headers, body) = raw_http_request(addr, "GET", path).await;
+        assert_eq!(status, expected_status.as_u16(), "{path}");
+        assert_eq!(
+            header_val(&headers, "transfer-encoding"),
+            None,
+            "{path} should not be chunked"
+        );
+        assert!(body.is_empty(), "{path} should not write body bytes");
+    }
+}
+
+#[tokio::test]
+async fn tcp_streaming_response_flushes_before_eof() {
+    let app = App::new().get("/stream", |_req: Request| async move {
+        let stream = futures_util::stream::unfold(0u8, |state| async move {
+            match state {
+                0 => Some((
+                    Ok(http_body::Frame::data(bytes::Bytes::from_static(b"first"))),
+                    1,
+                )),
+                1 => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    Some((
+                        Ok(http_body::Frame::data(bytes::Bytes::from_static(b"second"))),
+                        2,
+                    ))
+                }
+                _ => None,
+            }
+        });
+        Response::streaming(StatusCode::OK, stream)
+    });
+    let addr = start_server(app).await;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let initial = tokio::time::timeout(Duration::from_millis(100), async {
+        let mut acc = Vec::new();
+        loop {
+            let mut buf = [0u8; 256];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "connection closed before first chunk arrived");
+            acc.extend_from_slice(&buf[..n]);
+            if acc.windows(b"first".len()).any(|window| window == b"first") {
+                break acc;
+            }
+        }
+    })
+    .await
+    .expect("expected response head and first chunk before stream EOF");
+
+    let initial_text = String::from_utf8_lossy(&initial);
+    assert!(initial_text.contains("HTTP/1.1 200"));
+    assert!(
+        initial_text.contains("first"),
+        "expected first chunk to flush early: {initial_text}"
+    );
+
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
+
+    let mut full = initial;
+    full.extend_from_slice(&rest);
+    let full_text = String::from_utf8_lossy(&full);
+    assert!(full_text.contains("second"));
+    assert!(full_text.contains("0\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn tcp_request_body_streams_before_request_eof() {
+    let app = App::new().post("/first-chunk", |mut req: Request| async move {
+        use http_body_util::BodyExt;
+
+        let frame = req
+            .inner_mut()
+            .body_mut()
+            .frame()
+            .await
+            .expect("body should yield first chunk")
+            .expect("chunk should not error");
+        let data = frame.into_data().expect("expected data frame");
+        Response::text(String::from_utf8_lossy(&data).to_string())
+    });
+    let addr = start_server(app).await;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"POST /first-chunk HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n",
+        )
+        .await
+        .unwrap();
+
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_millis(250), stream.read_to_end(&mut buf))
+        .await
+        .expect("expected response before request EOF")
+        .unwrap();
+
+    let raw = String::from_utf8_lossy(&buf);
+    assert!(raw.contains("HTTP/1.1 200"), "unexpected response: {raw}");
+    assert!(
+        raw.contains("hello"),
+        "expected first chunk in response: {raw}"
+    );
+    assert!(raw.to_lowercase().contains("connection: close"));
 }
 
 #[tokio::test]
@@ -1408,9 +1637,13 @@ async fn client_session_tampered_cookie_rejected() {
 // default backend in favour of the custom harrow-codec-h1 path.
 // These tests will be re-enabled when harrow-codec-h2 is implemented (#57).
 // ============================================================================
-#[cfg(feature = "h2")]
+#[cfg(any())]
 mod h2c_tests {
     use super::*;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::client::conn::http2 as h2_client;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
 
     /// Helper: perform an HTTP/2 cleartext (h2c) request against a harrow server.
     /// Returns (status, body_string).
