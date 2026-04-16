@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use harrow_server::h1::{ResponseBodyMode, ResponseWritePlan};
+use harrow_server::h1::{ResponseBodyMode, ResponseWritePlan, declared_content_length};
 use http_body_util::BodyExt;
 use monoio::io::AsyncWriteRentExt;
 
@@ -23,6 +23,12 @@ impl H1Connection {
         }
 
         let plan = ResponseWritePlan::new(&parts.headers, is_head_request, parts.status);
+        let expected_len = match plan.mode {
+            ResponseBodyMode::Fixed => declared_content_length(&parts.headers)
+                .map_err(std::io::Error::other)?
+                .ok_or_else(|| std::io::Error::other("fixed response missing content-length"))?,
+            _ => 0,
+        };
 
         let head = codec::write_response_head(parts.status, &parts.headers, plan.is_chunked());
         let (result, _) = self.stream.write_all(head).await;
@@ -30,7 +36,7 @@ impl H1Connection {
 
         match plan.mode {
             ResponseBodyMode::None => {}
-            ResponseBodyMode::Fixed => self.write_body_direct(body).await?,
+            ResponseBodyMode::Fixed => self.write_body_direct(body, expected_len).await?,
             ResponseBodyMode::Chunked => self.write_body_chunked(body).await?,
         }
 
@@ -40,13 +46,33 @@ impl H1Connection {
     async fn write_body_direct(
         &mut self,
         mut body: harrow_core::response::ResponseBody,
+        expected_len: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut written = 0usize;
+
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|e| -> Box<dyn std::error::Error> { e })?;
-            if let Ok(data) = frame.into_data() {
+            if let Ok(data) = frame.into_data()
+                && !data.is_empty()
+            {
+                written = written
+                    .checked_add(data.len())
+                    .ok_or_else(|| std::io::Error::other("fixed response length overflow"))?;
+                if written > expected_len {
+                    return Err(Box::new(std::io::Error::other(
+                        "response body exceeds declared content-length",
+                    )));
+                }
                 self.write_data_frame(data).await?;
             }
         }
+
+        if written != expected_len {
+            return Err(Box::new(std::io::Error::other(
+                "response body shorter than declared content-length",
+            )));
+        }
+
         Ok(())
     }
 

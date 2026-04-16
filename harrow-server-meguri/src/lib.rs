@@ -111,8 +111,8 @@ const TIMEOUT_USER_DATA: u64 = u64::MAX - 1;
 const DISPATCH_TICK_USER_DATA: u64 = u64::MAX - 2;
 
 #[cfg(target_os = "linux")]
-/// Interval for the periodic timeout sweep (1 second).
-const TIMEOUT_SWEEP_SECS: i64 = 1;
+/// Special user_data value for timeout cancel SQEs.
+const TIMEOUT_CANCEL_USER_DATA: u64 = u64::MAX - 3;
 
 #[cfg(target_os = "linux")]
 /// Wake interval while a local dispatch task is still in flight.
@@ -469,10 +469,10 @@ fn worker_loop(
 
     let listener_fd = listener.as_raw_fd();
 
-    // Timeout spec for periodic sweeps. Must live on the stack across
-    // submit_and_wait since the kernel reads it asynchronously.
-    let sweep_ts = libc::timespec {
-        tv_sec: TIMEOUT_SWEEP_SECS,
+    // Timeout specs must live on the stack across submit_and_wait since the
+    // kernel reads them asynchronously.
+    let mut timeout_ts = libc::timespec {
+        tv_sec: 0,
         tv_nsec: 0,
     };
     let dispatch_tick_ts = libc::timespec {
@@ -480,15 +480,16 @@ fn worker_loop(
         tv_nsec: DISPATCH_TICK_MILLIS * 1_000_000,
     };
     let mut dispatch_tick_armed = false;
+    let mut timeout_armed = false;
+    let mut timeout_deadline = None;
 
-    // Submit initial accept and periodic timeout SQEs.
+    // Submit initial accept SQE.
     submit_accept(
         &mut ring,
         listener_fd,
         &mut accept_addr,
         &mut accept_addrlen,
     );
-    submit_timeout(&mut ring, &sweep_ts);
 
     loop {
         // Check shutdown flag.
@@ -496,6 +497,15 @@ fn worker_loop(
             tracing::debug!("worker shutting down");
             break;
         }
+
+        schedule_next_timeout(
+            &mut ring,
+            &conns,
+            config,
+            &mut timeout_armed,
+            &mut timeout_deadline,
+            &mut timeout_ts,
+        );
 
         if dispatch_tick_needed(&conns) && !dispatch_tick_armed {
             submit_dispatch_tick(&mut ring, &dispatch_tick_ts);
@@ -522,10 +532,11 @@ fn worker_loop(
                     );
                 }
             } else if user_data == TIMEOUT_USER_DATA {
-                // Periodic timeout fired — sweep timed-out connections.
+                timeout_armed = false;
+                timeout_deadline = None;
                 sweep_timed_out_connections(&mut conns, config);
-                // Re-arm.
-                submit_timeout(&mut ring, &sweep_ts);
+            } else if user_data == TIMEOUT_CANCEL_USER_DATA {
+                // Old timeout canceled so a new nearest-deadline timeout can replace it.
             } else if user_data == DISPATCH_TICK_USER_DATA {
                 dispatch_tick_armed = false;
             } else {
@@ -539,12 +550,21 @@ fn worker_loop(
         ring.cq_mut().flush_head();
 
         drive_dispatch_runtime(&tokio_rt, &local);
-        advance_dispatching_connections(&mut ring, &mut conns, config);
+        advance_dispatching_connections(&mut ring, &mut conns, &shared, &local, config);
+        advance_response_streaming_connections(&mut ring, &mut conns, &shared, &local, config);
     }
 
     // Drain phase: wait for in-flight connections.
     let drain_start = std::time::Instant::now();
     while !conns.is_empty() && drain_start.elapsed() < config.drain_timeout {
+        schedule_next_timeout(
+            &mut ring,
+            &conns,
+            config,
+            &mut timeout_armed,
+            &mut timeout_deadline,
+            &mut timeout_ts,
+        );
         if dispatch_tick_needed(&conns) && !dispatch_tick_armed {
             submit_dispatch_tick(&mut ring, &dispatch_tick_ts);
             dispatch_tick_armed = true;
@@ -555,6 +575,11 @@ fn worker_loop(
             let res = cqe.res;
             if user_data == DISPATCH_TICK_USER_DATA {
                 dispatch_tick_armed = false;
+            } else if user_data == TIMEOUT_USER_DATA {
+                timeout_armed = false;
+                timeout_deadline = None;
+                sweep_timed_out_connections(&mut conns, config);
+            } else if user_data == TIMEOUT_CANCEL_USER_DATA {
             } else if user_data != ACCEPT_USER_DATA && user_data != TIMEOUT_USER_DATA {
                 handle_conn_completion(
                     user_data, res, &mut ring, &mut conns, &shared, &local, config,
@@ -564,7 +589,8 @@ fn worker_loop(
         }
         ring.cq_mut().flush_head();
         drive_dispatch_runtime(&tokio_rt, &local);
-        advance_dispatching_connections(&mut ring, &mut conns, config);
+        advance_dispatching_connections(&mut ring, &mut conns, &shared, &local, config);
+        advance_response_streaming_connections(&mut ring, &mut conns, &shared, &local, config);
     }
 
     if !conns.is_empty() {
@@ -837,46 +863,9 @@ fn handle_conn_completion(
 
         if matches!(conns[conn_idx].state, connection::ConnState::Headers) {
             let result = conns[conn_idx].on_recv(nbytes, config.max_body_size);
-
-            match result {
-                connection::ProcessResult::NeedRecv => {
-                    if !submit_recv(ring, conn_idx, &mut conns[conn_idx]) {
-                        close_conn(conn_idx, conns);
-                    }
-                }
-                connection::ProcessResult::Dispatch => {
-                    if conns[conn_idx]
-                        .parsed
-                        .as_ref()
-                        .is_some_and(|p| p.expect_continue)
-                    {
-                        submit_continue(ring, conn_idx, &mut conns[conn_idx]);
-                    }
-
-                    if !spawn_dispatch_task(conn_idx, conns, shared, local) {
-                        close_conn(conn_idx, conns);
-                        return;
-                    }
-
-                    advance_dispatching_connection(ring, conns, conn_idx, config);
-                }
-                connection::ProcessResult::WriteError(resp) => {
-                    let conn = &mut conns[conn_idx];
-                    conn.response_buf = resp;
-                    conn.response_written = 0;
-                    conn.keep_alive = false;
-                    conn.buf.clear();
-                    conn.state = connection::ConnState::Writing;
-                    if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
-                        close_conn(conn_idx, conns);
-                    }
-                }
-                connection::ProcessResult::Close => {
-                    close_conn(conn_idx, conns);
-                }
-            }
+            handle_process_result(ring, conns, conn_idx, result, shared, local, config);
         } else if matches!(conns[conn_idx].state, connection::ConnState::Dispatching) {
-            advance_dispatching_connection(ring, conns, conn_idx, config);
+            advance_dispatching_connection(ring, conns, conn_idx, shared, local, config);
         }
     } else if conn.write_pending {
         conn.write_pending = false;
@@ -893,28 +882,7 @@ fn handle_conn_completion(
 
         let nbytes = res as usize;
         let result = conn.on_write(nbytes);
-
-        match result {
-            connection::WriteResult::WriteMore => {
-                if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
-                    close_conn(conn_idx, conns);
-                }
-            }
-            connection::WriteResult::RecvNext => {
-                advance_dispatching_connection(ring, conns, conn_idx, config);
-                if conns.contains(conn_idx)
-                    && matches!(conns[conn_idx].state, connection::ConnState::Headers)
-                    && !conns[conn_idx].recv_pending
-                {
-                    if !submit_recv(ring, conn_idx, &mut conns[conn_idx]) {
-                        close_conn(conn_idx, conns);
-                    }
-                }
-            }
-            connection::WriteResult::Close => {
-                close_conn(conn_idx, conns);
-            }
-        }
+        handle_write_result(ring, conns, conn_idx, result, shared, local, config);
     }
 }
 
@@ -941,15 +909,96 @@ fn submit_write(ring: &mut meguri::Ring, conn_idx: usize, conn: &mut connection:
 }
 
 #[cfg(target_os = "linux")]
-fn submit_timeout(ring: &mut meguri::Ring, ts: &libc::timespec) {
-    ring.sq()
-        .push_timeout(TIMEOUT_USER_DATA, ts as *const _, 0, 0);
+fn submit_timeout_cancel(ring: &mut meguri::Ring) {
+    let _ = ring
+        .sq()
+        .push_cancel(TIMEOUT_CANCEL_USER_DATA, TIMEOUT_USER_DATA);
 }
 
 #[cfg(target_os = "linux")]
 fn submit_dispatch_tick(ring: &mut meguri::Ring, ts: &libc::timespec) {
     ring.sq()
         .push_timeout(DISPATCH_TICK_USER_DATA, ts as *const _, 0, 0);
+}
+
+#[cfg(target_os = "linux")]
+fn schedule_next_timeout(
+    ring: &mut meguri::Ring,
+    conns: &slab::Slab<connection::Conn>,
+    config: &ServerConfig,
+    timeout_armed: &mut bool,
+    timeout_deadline: &mut Option<std::time::Instant>,
+    timeout_ts: &mut libc::timespec,
+) {
+    let next_deadline = next_timeout_deadline(conns, config);
+    if next_deadline == *timeout_deadline {
+        return;
+    }
+
+    if *timeout_armed {
+        submit_timeout_cancel(ring);
+        *timeout_armed = false;
+    }
+
+    *timeout_deadline = next_deadline;
+
+    let Some(deadline) = next_deadline else {
+        return;
+    };
+
+    let delay = deadline.saturating_duration_since(std::time::Instant::now());
+    *timeout_ts = duration_to_timespec(delay);
+    if ring
+        .sq()
+        .push_timeout(TIMEOUT_USER_DATA, timeout_ts as *const _, 0, 0)
+    {
+        *timeout_armed = true;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn next_timeout_deadline(
+    conns: &slab::Slab<connection::Conn>,
+    config: &ServerConfig,
+) -> Option<std::time::Instant> {
+    conns
+        .iter()
+        .filter(|(_, conn)| !matches!(conn.state, connection::ConnState::Closed))
+        .filter_map(|(_, conn)| connection_timeout_deadline(conn, config))
+        .min()
+}
+
+#[cfg(target_os = "linux")]
+fn connection_timeout_deadline(
+    conn: &connection::Conn,
+    config: &ServerConfig,
+) -> Option<std::time::Instant> {
+    let lifetime_deadline = config
+        .connection_timeout
+        .map(|timeout| conn.accepted_at + timeout);
+    let phase_deadline = match conn.state {
+        connection::ConnState::Headers => config
+            .header_read_timeout
+            .map(|timeout| conn.request_started_at + timeout),
+        connection::ConnState::Dispatching if conn.request_body_in_progress() => config
+            .body_read_timeout
+            .map(|timeout| conn.request_started_at + timeout),
+        _ => None,
+    };
+
+    match (lifetime_deadline, phase_deadline) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn duration_to_timespec(duration: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: duration.as_secs() as i64,
+        tv_nsec: i64::from(duration.subsec_nanos()),
+    }
 }
 
 /// Sweep connections that have exceeded their timeouts.
@@ -1041,9 +1090,11 @@ fn submit_write_or_close(
 
 #[cfg(target_os = "linux")]
 fn dispatch_tick_needed(conns: &slab::Slab<connection::Conn>) -> bool {
-    conns
-        .iter()
-        .any(|(_, conn)| matches!(conn.state, connection::ConnState::Dispatching))
+    conns.iter().any(|(_, conn)| {
+        conn.has_active_dispatch()
+            || conn.has_active_response_stream()
+            || matches!(conn.state, connection::ConnState::Dispatching)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1066,29 +1117,148 @@ fn spawn_dispatch_task(
     };
 
     let shared = Arc::clone(shared);
-    let (tx, rx) = mpsc::channel();
-    conns[conn_idx].set_dispatch_receiver(rx);
+    let (tx, handle) = connection::dispatch_slot();
+    conns[conn_idx].set_dispatch_handle(handle);
 
     local.spawn_local(async move {
-        use http_body_util::BodyExt;
-
         let response = dispatch::dispatch(shared, request).await;
-        let (parts, body) = response.into_parts();
-        let body_data = body
-            .collect()
-            .await
-            .map(|collected| collected.to_bytes())
-            .map_err(|err| err as Box<dyn std::error::Error + Send + Sync>);
-        let _ = tx.send(connection::DispatchResult { parts, body_data });
+        tx.send(Ok(response));
     });
 
     true
 }
 
 #[cfg(target_os = "linux")]
+fn start_response_stream_task(
+    conn_idx: usize,
+    conns: &mut slab::Slab<connection::Conn>,
+    local: &tokio::task::LocalSet,
+    response: http::Response<harrow_core::response::ResponseBody>,
+) {
+    let keep_alive = conns[conn_idx].keep_alive;
+    let is_head_request = conns[conn_idx]
+        .parsed
+        .as_ref()
+        .is_some_and(|parsed| parsed.method == http::Method::HEAD);
+    let (tx, rx) = connection::response_channel();
+    conns[conn_idx].set_response_receiver(rx);
+
+    local.spawn_local(async move {
+        connection::stream_response(tx, response, keep_alive, is_head_request).await;
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn handle_process_result(
+    ring: &mut meguri::Ring,
+    conns: &mut slab::Slab<connection::Conn>,
+    conn_idx: usize,
+    process_result: connection::ProcessResult,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
+    config: &ServerConfig,
+) {
+    match process_result {
+        connection::ProcessResult::NeedRecv => {
+            submit_recv_or_close(ring, conn_idx, conns);
+        }
+        connection::ProcessResult::Dispatch => {
+            if conns[conn_idx]
+                .parsed
+                .as_ref()
+                .is_some_and(|p| p.expect_continue)
+            {
+                submit_continue(ring, conn_idx, &mut conns[conn_idx]);
+            }
+
+            if !spawn_dispatch_task(conn_idx, conns, shared, local) {
+                close_conn(conn_idx, conns);
+                return;
+            }
+
+            advance_dispatching_connection(ring, conns, conn_idx, shared, local, config);
+        }
+        connection::ProcessResult::WriteError(resp) => {
+            conns[conn_idx].set_serialized_response(resp, false);
+            conns[conn_idx].buf.clear();
+            if !submit_write(ring, conn_idx, &mut conns[conn_idx]) {
+                close_conn(conn_idx, conns);
+            }
+        }
+        connection::ProcessResult::Close => {
+            close_conn(conn_idx, conns);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_write_result(
+    ring: &mut meguri::Ring,
+    conns: &mut slab::Slab<connection::Conn>,
+    conn_idx: usize,
+    result: connection::WriteResult,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
+    config: &ServerConfig,
+) {
+    match result {
+        connection::WriteResult::WriteMore => {
+            submit_write_or_close(ring, conn_idx, conns);
+        }
+        connection::WriteResult::AwaitResponse => {
+            advance_response_stream(ring, conns, conn_idx, shared, local, config);
+        }
+        connection::WriteResult::RecvNext => {
+            let process_result = {
+                let conn = &mut conns[conn_idx];
+                conn.resume_after_keep_alive(config.max_body_size)
+            };
+            handle_process_result(ring, conns, conn_idx, process_result, shared, local, config);
+        }
+        connection::WriteResult::Close => {
+            close_conn(conn_idx, conns);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn advance_response_stream(
+    ring: &mut meguri::Ring,
+    conns: &mut slab::Slab<connection::Conn>,
+    conn_idx: usize,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
+    config: &ServerConfig,
+) {
+    if !conns.contains(conn_idx) || conns[conn_idx].write_pending {
+        return;
+    }
+
+    match conns[conn_idx].poll_response_stream() {
+        connection::ResponseProgress::Pending => {}
+        connection::ResponseProgress::WriteReady => {
+            submit_write_or_close(ring, conn_idx, conns);
+        }
+        connection::ResponseProgress::Complete => {
+            let result = conns[conn_idx].on_write(0);
+            handle_write_result(ring, conns, conn_idx, result, shared, local, config);
+        }
+        connection::ResponseProgress::StartError => {
+            conns[conn_idx].set_internal_server_error();
+            submit_write_or_close(ring, conn_idx, conns);
+        }
+        connection::ResponseProgress::StreamError => {
+            close_conn(conn_idx, conns);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn advance_dispatching_connections(
     ring: &mut meguri::Ring,
     conns: &mut slab::Slab<connection::Conn>,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
     config: &ServerConfig,
 ) {
     let dispatching: Vec<usize> = conns
@@ -1099,7 +1269,32 @@ fn advance_dispatching_connections(
 
     for conn_idx in dispatching {
         if conns.contains(conn_idx) {
-            advance_dispatching_connection(ring, conns, conn_idx, config);
+            advance_dispatching_connection(ring, conns, conn_idx, shared, local, config);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn advance_response_streaming_connections(
+    ring: &mut meguri::Ring,
+    conns: &mut slab::Slab<connection::Conn>,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
+    config: &ServerConfig,
+) {
+    let writing: Vec<usize> = conns
+        .iter()
+        .filter(|(_, conn)| {
+            matches!(conn.state, connection::ConnState::Writing)
+                && conn.has_active_response_stream()
+                && !conn.write_pending
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    for conn_idx in writing {
+        if conns.contains(conn_idx) {
+            advance_response_stream(ring, conns, conn_idx, shared, local, config);
         }
     }
 }
@@ -1109,6 +1304,8 @@ fn advance_dispatching_connection(
     ring: &mut meguri::Ring,
     conns: &mut slab::Slab<connection::Conn>,
     conn_idx: usize,
+    shared: &Arc<SharedState>,
+    local: &tokio::task::LocalSet,
     config: &ServerConfig,
 ) {
     if !conns.contains(conn_idx)
@@ -1118,18 +1315,27 @@ fn advance_dispatching_connection(
     }
 
     if let Some(dispatch_result) = conns[conn_idx].poll_dispatch_result() {
-        let conn = &mut conns[conn_idx];
         match dispatch_result {
-            Ok(result) => {
-                if conn.request_body_in_progress() {
-                    conn.keep_alive = false;
-                    conn.abort_request_body();
+            Ok(response) => {
+                if conns[conn_idx].request_body_in_progress() {
+                    conns[conn_idx].keep_alive = false;
+                    conns[conn_idx].abort_request_body();
                 }
-                conn.set_response(result.parts, result.body_data);
+                start_response_stream_task(conn_idx, conns, local, response);
+                advance_response_stream(ring, conns, conn_idx, shared, local, config);
             }
-            Err(()) => conn.set_internal_server_error(),
+            Err(()) => {
+                conns[conn_idx].set_internal_server_error();
+                submit_write_or_close(ring, conn_idx, conns);
+            }
         }
-        submit_write_or_close(ring, conn_idx, conns);
+    }
+
+    advance_response_stream(ring, conns, conn_idx, shared, local, config);
+
+    if !conns.contains(conn_idx)
+        || !matches!(conns[conn_idx].state, connection::ConnState::Dispatching)
+    {
         return;
     }
 

@@ -13,21 +13,25 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::os::fd::RawFd;
 use std::rc::{Rc, Weak};
-use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes, BytesMut};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, Full};
+use tokio::sync::mpsc;
 
 use harrow_codec_h1::{self as codec, CodecError, ParsedRequest, PayloadDecoder, PayloadItem};
 use harrow_core::request::Body;
 use harrow_server::h1::{
-    ErrorResponse, ResponseBodyMode, ResponseWritePlan, build_request, request_exceeds_body_limit,
+    ErrorResponse, ResponseBodyMode, ResponseWritePlan, build_request, declared_content_length,
+    request_exceeds_body_limit,
 };
 
 const MAX_REQUEST_BODY_BUFFER_SIZE: usize = 32 * 1024;
+const MAX_RESPONSE_BUFFER_SIZE: usize = 32 * 1024;
+const RESPONSE_STREAM_CHUNK_SIZE: usize = 8 * 1024;
+const RESPONSE_STREAM_CAPACITY: usize = MAX_RESPONSE_BUFFER_SIZE / RESPONSE_STREAM_CHUNK_SIZE;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -45,10 +49,32 @@ pub(crate) enum ConnState {
     Closed,
 }
 
-/// Result sent back from the local Tokio task once dispatch completes.
-pub(crate) struct DispatchResult {
-    pub parts: http::response::Parts,
-    pub body_data: Result<Bytes, BoxError>,
+pub(crate) enum ResponseStreamEvent {
+    Data(Bytes),
+    Done,
+    Error,
+}
+
+pub(crate) enum ResponseProgress {
+    Pending,
+    WriteReady,
+    Complete,
+    StartError,
+    StreamError,
+}
+
+type DispatchResult = Result<http::Response<harrow_core::response::ResponseBody>, ()>;
+
+pub(crate) struct DispatchHandle {
+    inner: Rc<DispatchInner>,
+}
+
+pub(crate) struct DispatchSender {
+    inner: Weak<DispatchInner>,
+}
+
+struct DispatchInner {
+    result: RefCell<Option<DispatchResult>>,
 }
 
 /// Per-connection state.
@@ -63,12 +89,20 @@ pub(crate) struct Conn {
     request_body: Option<RequestBodyState>,
     /// Request body handed to Harrow when dispatch starts.
     pending_request_body: Option<Body>,
-    /// Completion receiver for the spawned dispatch task.
-    dispatch_rx: Option<mpsc::Receiver<DispatchResult>>,
+    /// Completion slot for the spawned local dispatch task.
+    dispatch_handle: Option<DispatchHandle>,
+    /// Response byte stream produced by the spawned local dispatch task.
+    response_rx: Option<mpsc::Receiver<ResponseStreamEvent>>,
     /// Serialized response bytes to write.
     pub response_buf: Vec<u8>,
     /// Number of response bytes already written.
     pub response_written: usize,
+    /// Whether the response stream yielded at least one byte chunk.
+    response_started: bool,
+    /// Whether the response stream finished cleanly.
+    response_done: bool,
+    /// Whether the response stream failed after starting.
+    response_failed: bool,
     /// Whether to keep-alive after this request.
     pub keep_alive: bool,
     /// Whether there is a pending RECV SQE for this connection.
@@ -111,6 +145,8 @@ pub(crate) enum BodyPumpResult {
 pub(crate) enum WriteResult {
     /// Submit another WRITE SQE (more bytes to send).
     WriteMore,
+    /// Wait for the response producer to yield the next bytes.
+    AwaitResponse,
     /// Submit a RECV SQE (keep-alive, start next request).
     RecvNext,
     /// Connection should be closed.
@@ -127,9 +163,13 @@ impl Conn {
             parsed: None,
             request_body: None,
             pending_request_body: None,
-            dispatch_rx: None,
+            dispatch_handle: None,
+            response_rx: None,
             response_buf: Vec::new(),
             response_written: 0,
+            response_started: false,
+            response_done: false,
+            response_failed: false,
             keep_alive: true,
             recv_pending: false,
             write_pending: false,
@@ -207,28 +247,99 @@ impl Conn {
         build_request(parsed, body).ok()
     }
 
-    pub fn set_dispatch_receiver(&mut self, rx: mpsc::Receiver<DispatchResult>) {
-        self.dispatch_rx = Some(rx);
+    pub fn set_dispatch_handle(&mut self, handle: DispatchHandle) {
+        self.dispatch_handle = Some(handle);
     }
 
-    pub fn poll_dispatch_result(&mut self) -> Option<Result<DispatchResult, ()>> {
-        let rx = self.dispatch_rx.as_ref()?;
+    pub fn poll_dispatch_result(&mut self) -> Option<DispatchResult> {
+        let result = self.dispatch_handle.as_ref()?.take();
+        if result.is_some() {
+            self.dispatch_handle = None;
+        }
+        result
+    }
 
-        match rx.try_recv() {
-            Ok(result) => {
-                self.dispatch_rx = None;
-                Some(Ok(result))
-            }
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.dispatch_rx = None;
-                Some(Err(()))
+    pub fn set_response_receiver(&mut self, rx: mpsc::Receiver<ResponseStreamEvent>) {
+        self.response_rx = Some(rx);
+        self.response_started = false;
+        self.response_done = false;
+        self.response_failed = false;
+    }
+
+    pub fn poll_response_stream(&mut self) -> ResponseProgress {
+        if !self.response_buf.is_empty() && self.response_written < self.response_buf.len() {
+            return ResponseProgress::WriteReady;
+        }
+
+        loop {
+            let Some(rx) = self.response_rx.as_mut() else {
+                return if self.response_done {
+                    ResponseProgress::Complete
+                } else if self.response_failed {
+                    ResponseProgress::StreamError
+                } else {
+                    ResponseProgress::Pending
+                };
+            };
+
+            match rx.try_recv() {
+                Ok(ResponseStreamEvent::Data(chunk)) if chunk.is_empty() => continue,
+                Ok(ResponseStreamEvent::Data(chunk)) => {
+                    if matches!(self.state, ConnState::Dispatching)
+                        && self.request_body_in_progress()
+                    {
+                        self.keep_alive = false;
+                        self.abort_request_body();
+                    }
+
+                    self.response_buf.clear();
+                    self.response_buf.extend_from_slice(&chunk);
+                    self.response_written = 0;
+                    self.response_started = true;
+                    self.state = ConnState::Writing;
+                    return ResponseProgress::WriteReady;
+                }
+                Ok(ResponseStreamEvent::Done) => {
+                    self.response_rx = None;
+                    self.response_done = true;
+                    return if self.response_started {
+                        ResponseProgress::Complete
+                    } else {
+                        ResponseProgress::StartError
+                    };
+                }
+                Ok(ResponseStreamEvent::Error) => {
+                    self.response_rx = None;
+                    if self.response_started {
+                        self.response_failed = true;
+                        self.keep_alive = false;
+                        return ResponseProgress::StreamError;
+                    }
+                    return ResponseProgress::StartError;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return ResponseProgress::Pending,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.response_rx = None;
+                    return if self.response_done {
+                        ResponseProgress::Complete
+                    } else if self.response_started {
+                        self.response_failed = true;
+                        self.keep_alive = false;
+                        ResponseProgress::StreamError
+                    } else {
+                        ResponseProgress::StartError
+                    };
+                }
             }
         }
     }
 
     pub fn has_active_dispatch(&self) -> bool {
-        self.dispatch_rx.is_some()
+        self.dispatch_handle.is_some()
+    }
+
+    pub fn has_active_response_stream(&self) -> bool {
+        self.response_rx.is_some()
     }
 
     pub fn request_body_in_progress(&self) -> bool {
@@ -266,83 +377,44 @@ impl Conn {
         self.response_written += nbytes;
 
         if self.response_written < self.response_buf.len() {
-            WriteResult::WriteMore
-        } else if self.keep_alive {
-            self.reset();
-            WriteResult::RecvNext
-        } else {
+            return WriteResult::WriteMore;
+        }
+
+        self.response_buf.clear();
+        self.response_written = 0;
+
+        if self.response_done {
+            self.finish_response()
+        } else if self.response_failed {
             WriteResult::Close
+        } else {
+            WriteResult::AwaitResponse
         }
     }
 
-    /// Serialize a Harrow response into `self.response_buf` and transition to Writing.
-    pub fn set_response(
-        &mut self,
-        mut parts: http::response::Parts,
-        body_data: Result<Bytes, BoxError>,
-    ) {
-        let keep_alive = self.keep_alive;
-        let is_head_request = self
-            .parsed
-            .as_ref()
-            .is_some_and(|parsed| parsed.method == http::Method::HEAD);
-
-        if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
-            parts.headers.insert(
-                http::header::CONNECTION,
-                http::HeaderValue::from_static("close"),
-            );
-        }
-
-        let plan = ResponseWritePlan::new(&parts.headers, is_head_request, parts.status);
-        let mut head = codec::write_response_head(parts.status, &parts.headers, plan.is_chunked());
-
-        match body_data {
-            Ok(data) => match plan.mode {
-                ResponseBodyMode::None => {}
-                ResponseBodyMode::Fixed => {
-                    head.extend_from_slice(&data);
-                }
-                ResponseBodyMode::Chunked if !data.is_empty() => {
-                    head.extend_from_slice(&codec::encode_chunk(&data));
-                    head.extend_from_slice(codec::CHUNK_TERMINATOR);
-                }
-                ResponseBodyMode::Chunked => {
-                    head.extend_from_slice(codec::CHUNK_TERMINATOR);
-                }
-            },
-            Err(_) => {
-                head.clear();
-                head.extend_from_slice(
-                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\nconnection: close\r\n\r\ninternal server error",
-                );
-                self.keep_alive = false;
-            }
-        }
-
-        self.response_buf = head;
+    pub fn set_serialized_response(&mut self, response: Vec<u8>, keep_alive: bool) {
+        self.response_buf = response;
         self.response_written = 0;
+        self.response_started = true;
+        self.response_done = true;
+        self.response_failed = false;
+        self.keep_alive = keep_alive;
+        self.request_body = None;
+        self.pending_request_body = None;
+        self.dispatch_handle = None;
+        self.response_rx = None;
         self.state = ConnState::Writing;
     }
 
     pub fn set_error_response(&mut self, error: ErrorResponse) {
-        self.response_buf = wire_error(error, false);
-        self.response_written = 0;
-        self.keep_alive = false;
-        self.request_body = None;
-        self.pending_request_body = None;
-        self.dispatch_rx = None;
-        self.state = ConnState::Writing;
+        self.set_serialized_response(wire_error(error, false), false);
     }
 
     pub fn set_internal_server_error(&mut self) {
-        self.response_buf = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\nconnection: close\r\n\r\ninternal server error".to_vec();
-        self.response_written = 0;
-        self.keep_alive = false;
-        self.request_body = None;
-        self.pending_request_body = None;
-        self.dispatch_rx = None;
-        self.state = ConnState::Writing;
+        self.set_serialized_response(
+            b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\nconnection: close\r\n\r\ninternal server error".to_vec(),
+            false,
+        );
     }
 
     /// Reset connection state for the next request (keep-alive).
@@ -351,12 +423,33 @@ impl Conn {
         self.parsed = None;
         self.request_body = None;
         self.pending_request_body = None;
-        self.dispatch_rx = None;
+        self.dispatch_handle = None;
+        self.response_rx = None;
         self.response_buf.clear();
         self.response_written = 0;
+        self.response_started = false;
+        self.response_done = false;
+        self.response_failed = false;
         self.keep_alive = true;
         self.request_started_at = Instant::now();
         // Don't clear `buf` — leftover bytes from a pipelined request stay available.
+    }
+
+    pub fn resume_after_keep_alive(&mut self, max_body: usize) -> ProcessResult {
+        if self.buf.is_empty() {
+            ProcessResult::NeedRecv
+        } else {
+            self.process_headers(max_body)
+        }
+    }
+
+    fn finish_response(&mut self) -> WriteResult {
+        if self.keep_alive {
+            self.reset();
+            WriteResult::RecvNext
+        } else {
+            WriteResult::Close
+        }
     }
 
     /// Check whether the connection has exceeded its lifetime limit.
@@ -377,6 +470,143 @@ impl Conn {
 
         timeout.is_some_and(|d| self.request_started_at.elapsed() >= d)
     }
+}
+
+impl DispatchHandle {
+    fn take(&self) -> Option<DispatchResult> {
+        self.inner.result.borrow_mut().take()
+    }
+}
+
+impl DispatchSender {
+    pub fn send(self, result: DispatchResult) {
+        if let Some(inner) = self.inner.upgrade() {
+            *inner.result.borrow_mut() = Some(result);
+        }
+    }
+}
+
+pub(crate) fn dispatch_slot() -> (DispatchSender, DispatchHandle) {
+    let inner = Rc::new(DispatchInner {
+        result: RefCell::new(None),
+    });
+    (
+        DispatchSender {
+            inner: Rc::downgrade(&inner),
+        },
+        DispatchHandle { inner },
+    )
+}
+
+pub(crate) fn response_channel() -> (
+    mpsc::Sender<ResponseStreamEvent>,
+    mpsc::Receiver<ResponseStreamEvent>,
+) {
+    mpsc::channel(RESPONSE_STREAM_CAPACITY.max(1))
+}
+
+pub(crate) async fn stream_response(
+    tx: mpsc::Sender<ResponseStreamEvent>,
+    response: http::Response<harrow_core::response::ResponseBody>,
+    keep_alive: bool,
+    is_head_request: bool,
+) {
+    let completed = stream_response_inner(&tx, response, keep_alive, is_head_request)
+        .await
+        .is_ok();
+    let terminal = if completed {
+        ResponseStreamEvent::Done
+    } else {
+        ResponseStreamEvent::Error
+    };
+    let _ = tx.send(terminal).await;
+}
+
+async fn stream_response_inner(
+    tx: &mpsc::Sender<ResponseStreamEvent>,
+    response: http::Response<harrow_core::response::ResponseBody>,
+    keep_alive: bool,
+    is_head_request: bool,
+) -> Result<(), ()> {
+    let (mut parts, mut body) = response.into_parts();
+
+    if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
+        parts.headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
+
+    let plan = ResponseWritePlan::new(&parts.headers, is_head_request, parts.status);
+    let expected_len = match plan.mode {
+        ResponseBodyMode::Fixed => declared_content_length(&parts.headers)
+            .map_err(|_| ())?
+            .ok_or(())?,
+        _ => 0,
+    };
+
+    let head = codec::write_response_head(parts.status, &parts.headers, plan.is_chunked());
+    if !send_response_bytes(tx, Bytes::from(head)).await {
+        return Ok(());
+    }
+
+    match plan.mode {
+        ResponseBodyMode::None => Ok(()),
+        ResponseBodyMode::Fixed => {
+            let mut written = 0usize;
+
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|_| ())?;
+                if let Ok(data) = frame.into_data()
+                    && !data.is_empty()
+                {
+                    written = written.checked_add(data.len()).ok_or(())?;
+                    if written > expected_len {
+                        return Err(());
+                    }
+                    if !send_response_bytes(tx, data).await {
+                        return Ok(());
+                    }
+                }
+            }
+
+            if written == expected_len {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+        ResponseBodyMode::Chunked => {
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|_| ())?;
+                if let Ok(data) = frame.into_data()
+                    && !data.is_empty()
+                    && !send_response_bytes(tx, Bytes::from(codec::encode_chunk(&data))).await
+                {
+                    return Ok(());
+                }
+            }
+
+            let _ = send_response_bytes(tx, Bytes::from_static(codec::CHUNK_TERMINATOR)).await;
+            Ok(())
+        }
+    }
+}
+
+async fn send_response_bytes(tx: &mpsc::Sender<ResponseStreamEvent>, mut data: Bytes) -> bool {
+    while !data.is_empty() {
+        let next = if data.len() <= RESPONSE_STREAM_CHUNK_SIZE {
+            std::mem::take(&mut data)
+        } else {
+            data.split_to(RESPONSE_STREAM_CHUNK_SIZE)
+        };
+
+        if tx.send(ResponseStreamEvent::Data(next)).await.is_err() {
+            return false;
+        }
+    }
+
+    true
 }
 
 struct RequestBodyState {
@@ -675,6 +905,36 @@ mod tests {
             })
     }
 
+    fn collect_response_stream(
+        response: http::Response<harrow_core::response::ResponseBody>,
+        keep_alive: bool,
+        is_head_request: bool,
+    ) -> (Vec<u8>, bool) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let (tx, mut rx) = response_channel();
+                stream_response(tx, response, keep_alive, is_head_request).await;
+
+                let mut bytes = Vec::new();
+                let mut saw_done = false;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        ResponseStreamEvent::Data(chunk) => bytes.extend_from_slice(&chunk),
+                        ResponseStreamEvent::Done => {
+                            saw_done = true;
+                            break;
+                        }
+                        ResponseStreamEvent::Error => break,
+                    }
+                }
+
+                (bytes, saw_done)
+            })
+    }
+
     // --- Header parsing ---
 
     #[test]
@@ -830,6 +1090,7 @@ mod tests {
         let mut conn = new_conn();
         conn.response_buf = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         conn.state = ConnState::Writing;
+        conn.response_done = true;
         conn.keep_alive = false;
         let result = conn.on_write(conn.response_buf.len());
         assert!(matches!(result, WriteResult::Close));
@@ -840,6 +1101,7 @@ mod tests {
         let mut conn = new_conn();
         conn.response_buf = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         conn.state = ConnState::Writing;
+        conn.response_done = true;
         conn.keep_alive = true;
         let result = conn.on_write(conn.response_buf.len());
         assert!(matches!(result, WriteResult::RecvNext));
@@ -857,69 +1119,87 @@ mod tests {
     }
 
     #[test]
-    fn set_response_inserts_connection_close_before_serializing() {
+    fn write_complete_waits_for_stream_when_response_not_done() {
         let mut conn = new_conn();
-        conn.keep_alive = false;
-        let parts = http::Response::builder()
-            .status(http::StatusCode::OK)
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0;
+        conn.response_buf = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        conn.state = ConnState::Writing;
+        let result = conn.on_write(conn.response_buf.len());
+        assert!(matches!(result, WriteResult::AwaitResponse));
+    }
 
-        conn.set_response(parts, Ok(Bytes::new()));
+    #[test]
+    fn resume_after_keep_alive_reuses_buffered_pipelined_request() {
+        let mut conn = new_conn();
+        conn.response_buf = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        conn.response_done = true;
+        conn.state = ConnState::Writing;
+        conn.keep_alive = true;
+        conn.buf
+            .extend_from_slice(b"GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
-        let response = String::from_utf8_lossy(&conn.response_buf);
+        let result = conn.on_write(conn.response_buf.len());
+        assert!(matches!(result, WriteResult::RecvNext));
+
+        let next = conn.resume_after_keep_alive(1024);
+        assert!(matches!(next, ProcessResult::Dispatch));
+        assert!(matches!(conn.state, ConnState::Dispatching));
+        assert_eq!(
+            conn.parsed.as_ref().map(|parsed| parsed.uri.path()),
+            Some("/next")
+        );
+    }
+
+    #[test]
+    fn stream_response_inserts_connection_close_before_serializing() {
+        let response = harrow_core::response::Response::ok().into_inner();
+
+        let (response, saw_done) = collect_response_stream(response, false, false);
+        let response = String::from_utf8_lossy(&response);
+        assert!(saw_done);
         assert!(response.contains("connection: close\r\n"));
         assert!(response.contains("transfer-encoding: chunked\r\n"));
     }
 
     #[test]
-    fn set_response_omits_chunked_for_bodyless_status() {
-        let mut conn = new_conn();
-        let parts = http::Response::builder()
-            .status(http::StatusCode::NO_CONTENT)
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0;
+    fn stream_response_omits_chunked_for_bodyless_status() {
+        let response = harrow_core::response::Response::ok()
+            .status(http::StatusCode::NO_CONTENT.as_u16())
+            .into_inner();
 
-        conn.set_response(parts, Ok(Bytes::from_static(b"ignored")));
-
-        let response = String::from_utf8_lossy(&conn.response_buf);
+        let (response, saw_done) = collect_response_stream(response, true, false);
+        let response = String::from_utf8_lossy(&response);
+        assert!(saw_done);
         assert!(response.starts_with("HTTP/1.1 204 No Content\r\n"));
         assert!(!response.contains("transfer-encoding: chunked\r\n"));
         assert!(response.ends_with("\r\n\r\n"));
     }
 
     #[test]
-    fn set_response_omits_head_body_bytes() {
-        let mut conn = new_conn();
-        conn.parsed = Some(ParsedRequest {
-            method: http::Method::HEAD,
-            uri: "/".parse().unwrap(),
-            version: http::Version::HTTP_11,
-            headers: http::HeaderMap::new(),
-            header_len: 0,
-            keep_alive: true,
-            content_length: None,
-            chunked: false,
-            expect_continue: false,
-        });
-        let parts = http::Response::builder()
-            .status(http::StatusCode::OK)
-            .header(http::header::CONTENT_LENGTH, "5")
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0;
+    fn stream_response_omits_head_body_bytes() {
+        let response = harrow_core::response::Response::text("hello")
+            .header("content-length", "5")
+            .into_inner();
 
-        conn.set_response(parts, Ok(Bytes::from_static(b"hello")));
-
-        let response = String::from_utf8_lossy(&conn.response_buf);
+        let (response, saw_done) = collect_response_stream(response, true, true);
+        let response = String::from_utf8_lossy(&response);
+        assert!(saw_done);
         assert!(response.contains("content-length: 5\r\n"));
         assert!(response.ends_with("\r\n\r\n"));
         assert!(!response.ends_with("\r\n\r\nhello"));
+    }
+
+    #[test]
+    fn stream_response_fixed_length_mismatch_reports_error() {
+        let response = harrow_core::response::Response::text("hello")
+            .header("content-length", "10")
+            .into_inner();
+
+        let (response, saw_done) = collect_response_stream(response, true, false);
+        let response = String::from_utf8_lossy(&response);
+        assert!(!saw_done);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("content-length: 10\r\n"));
+        assert!(response.ends_with("hello"));
     }
 
     #[test]

@@ -50,6 +50,20 @@ pub fn response_body_permitted(is_head_request: bool, status: http::StatusCode) 
         && status != http::StatusCode::NOT_MODIFIED
 }
 
+pub fn declared_content_length(headers: &http::HeaderMap) -> Result<Option<usize>, &'static str> {
+    let Some(value) = headers.get(http::header::CONTENT_LENGTH) else {
+        return Ok(None);
+    };
+
+    let value = value
+        .to_str()
+        .map_err(|_| "invalid content-length header")?;
+    let length = value
+        .parse::<usize>()
+        .map_err(|_| "invalid content-length header")?;
+    Ok(Some(length))
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorResponse {
     BadRequest,
@@ -191,6 +205,20 @@ mod tests {
             http::StatusCode::NOT_MODIFIED
         ));
         assert!(response_body_permitted(false, http::StatusCode::OK));
+    }
+
+    #[test]
+    fn declared_content_length_parses_and_validates() {
+        let empty = http::HeaderMap::new();
+        assert_eq!(declared_content_length(&empty).unwrap(), None);
+
+        let mut ok = http::HeaderMap::new();
+        ok.insert(http::header::CONTENT_LENGTH, "5".parse().unwrap());
+        assert_eq!(declared_content_length(&ok).unwrap(), Some(5));
+
+        let mut invalid = http::HeaderMap::new();
+        invalid.insert(http::header::CONTENT_LENGTH, "abc".parse().unwrap());
+        assert!(declared_content_length(&invalid).is_err());
     }
 
     #[test]
