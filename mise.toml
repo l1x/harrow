@@ -297,6 +297,23 @@ cargo run -p harrow-bench --release --bin harrow-remote-perf-test -- \
   --config harrow-bench/spinr/text-c128.toml
 """
 
+[tasks."bench:compare:harrow-vs-ntex"]
+description = "Compare Harrow Tokio vs ntex Tokio across the framework-comparison suite"
+run = """
+cargo run -p harrow-bench --release --bin bench-compare -- \
+  --left harrow-tokio-prod-mimalloc-${HARROW_VERSION} \
+  --right ntex-tokio-prod-mimalloc-3.7.2 \
+  --suite harrow-bench/suites/framework-comparison.toml \
+  --registry harrow-bench/implementations.toml \
+  --mode remote \
+  --server-ssh ${BENCH_SERVER_IP} \
+  --client-ssh ${BENCH_CLIENT_IP} \
+  --server-private-ip ${BENCH_SERVER_PRIVATE_IP} \
+  --no-build-missing \
+  --duration 30 \
+  --warmup 5
+"""
+
 [tasks."bench:verify"]
 description = "Verify OS tuning and images on both bench nodes"
 run = "bash infra/scripts/verify-bench.sh $BENCH_SERVER_IP $BENCH_CLIENT_IP"
@@ -306,10 +323,10 @@ run = "bash infra/scripts/verify-bench.sh $BENCH_SERVER_IP $BENCH_CLIENT_IP"
 [tasks."bench:run:all"]
 description = "Run all implementations against framework-comparison suite"
 run = """
-IMPLS="harrow-tokio-prod-mimalloc-0.9.4
-harrow-tokio-prod-jemalloc-0.9.4
-harrow-tokio-prod-sysalloc-0.9.4
-harrow-monoio-prod-mimalloc-0.9.4
+IMPLS="harrow-tokio-prod-mimalloc-${HARROW_VERSION}
+harrow-tokio-prod-jemalloc-${HARROW_VERSION}
+harrow-tokio-prod-sysalloc-${HARROW_VERSION}
+harrow-monoio-prod-mimalloc-${HARROW_VERSION}
 axum-tokio-prod-mimalloc-0.8.8
 axum-tokio-prod-jemalloc-0.8.8
 axum-tokio-prod-sysalloc-0.8.8
@@ -344,20 +361,20 @@ done
 """
 
 [tasks."bench:run:harrow-tokio-mimalloc"]
-description = "Bench harrow-tokio-prod-mimalloc-0.9.4"
-run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-mimalloc-0.9.4 --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
+description = "Bench Harrow Tokio mimalloc"
+run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-mimalloc-${HARROW_VERSION} --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
 
 [tasks."bench:run:harrow-tokio-jemalloc"]
-description = "Bench harrow-tokio-prod-jemalloc-0.9.4"
-run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-jemalloc-0.9.4 --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
+description = "Bench Harrow Tokio jemalloc"
+run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-jemalloc-${HARROW_VERSION} --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
 
 [tasks."bench:run:harrow-tokio-sysalloc"]
-description = "Bench harrow-tokio-prod-sysalloc-0.9.4"
-run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-sysalloc-0.9.4 --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
+description = "Bench Harrow Tokio system allocator"
+run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-tokio-prod-sysalloc-${HARROW_VERSION} --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
 
 [tasks."bench:run:harrow-monoio-mimalloc"]
-description = "Bench harrow-monoio-prod-mimalloc-0.9.4"
-run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-monoio-prod-mimalloc-0.9.4 --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
+description = "Bench Harrow Monoio mimalloc"
+run = "cargo run -p harrow-bench --release --bin bench-single -- --impl harrow-monoio-prod-mimalloc-${HARROW_VERSION} --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
 
 [tasks."bench:run:axum-tokio-mimalloc"]
 description = "Bench axum-tokio-prod-mimalloc-0.8.8"

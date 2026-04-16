@@ -131,7 +131,7 @@ let app = App::new()
 - [Local-worker runtime strategy](docs/strategy-local-workers.md) -- the current nginx/ntex-style runtime direction
 - [HTTP/1 dispatcher design](docs/h1-dispatcher-design.md) -- how the shared custom backend is structured
 - [Explicit extractors philosophy](docs/explicit-extractors.md) -- the design choice behind plain function signatures
-- [Performance notes](docs/performance.md) -- benchmark methodology and results
+- [Performance notes](docs/performance.md) -- current benchmark workflow, methodology, and historical results
 
 ## Workspace layout
 

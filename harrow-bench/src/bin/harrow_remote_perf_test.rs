@@ -1,4 +1,8 @@
-//! Unified performance test orchestrator.
+//! Unified direct performance test orchestrator.
+//!
+//! This is the one-shot runner used by the `bench:baseline:*` and
+//! `bench:perf:*` mise tasks. It is intentionally narrower than the
+//! registry/suite-driven `bench-single` and `bench-compare` binaries.
 //!
 //! Supports both local (single-node) and remote (multi-node) deployments,
 //! using the spinr load generator.
