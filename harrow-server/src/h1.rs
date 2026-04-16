@@ -163,9 +163,10 @@ mod tests {
     #[test]
     fn build_request_preserves_head_parts() {
         let parsed = sample_request();
-        let body = Full::new(Bytes::from_static(b"hello"))
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} })
-            .boxed_unsync();
+        let body = Body::new(
+            Full::new(Bytes::from_static(b"hello"))
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} }),
+        );
 
         let request = build_request(&parsed, body).unwrap();
         assert_eq!(request.method(), http::Method::POST);

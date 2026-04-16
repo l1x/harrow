@@ -1425,6 +1425,7 @@ dependencies = [
  "harrow-core",
  "harrow-middleware",
  "harrow-o11y",
+ "harrow-server",
  "http",
  "http-body-util",
  "libc",

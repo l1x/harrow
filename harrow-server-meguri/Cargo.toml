@@ -23,6 +23,7 @@ profiling = ["meguri/profiling"]
 [dependencies]
 harrow-codec-h1 = { workspace = true }
 harrow-core = { workspace = true }
+harrow-server = { workspace = true }
 meguri = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }

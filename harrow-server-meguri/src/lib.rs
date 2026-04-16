@@ -70,6 +70,8 @@ pub struct ServerConfig {
     pub ring_entries: u32,
     /// Timeout for reading HTTP headers. Default: Some(5s).
     pub header_read_timeout: Option<Duration>,
+    /// Timeout for reading HTTP request bodies. Default: Some(30s).
+    pub body_read_timeout: Option<Duration>,
     /// Maximum connection lifetime. Default: Some(5 min).
     pub connection_timeout: Option<Duration>,
     /// Drain timeout during shutdown. Default: 30s.
@@ -87,6 +89,7 @@ impl Default for ServerConfig {
             max_connections: 8192,
             ring_entries: 4096,
             header_read_timeout: Some(Duration::from_secs(5)),
+            body_read_timeout: Some(Duration::from_secs(30)),
             connection_timeout: Some(Duration::from_secs(300)),
             drain_timeout: Duration::from_secs(30),
             max_body_size: 2 * 1024 * 1024,
@@ -923,7 +926,10 @@ fn sweep_timed_out_connections(conns: &mut slab::Slab<connection::Conn>, config:
         .filter(|(_, c)| {
             !matches!(c.state, connection::ConnState::Closed)
                 && (c.is_expired(config.connection_timeout)
-                    || c.read_timed_out(config.header_read_timeout))
+                    || c.read_timed_out_for_phase(
+                        config.header_read_timeout,
+                        config.body_read_timeout,
+                    ))
         })
         .map(|(i, _)| i)
         .collect();

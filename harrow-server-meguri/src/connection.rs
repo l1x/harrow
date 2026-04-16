@@ -11,10 +11,13 @@
 use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use http_body_util::BodyExt;
 
 use harrow_codec_h1::{self as codec, CodecError, ParsedRequest};
+use harrow_server::h1::{
+    ErrorResponse, ResponseBodyMode, ResponseWritePlan, build_request, request_exceeds_body_limit,
+};
 
 /// Connection states in the lifecycle.
 #[derive(Debug)]
@@ -128,16 +131,11 @@ impl Conn {
 
                 self.buf.advance(header_len);
 
-                if max_body > 0
-                    && let Some(cl) = content_length
-                    && cl as usize > max_body
-                {
-                    let resp = error_response(
-                        http::StatusCode::PAYLOAD_TOO_LARGE,
-                        "payload too large",
+                if request_exceeds_body_limit(content_length, max_body) {
+                    return ProcessResult::WriteError(wire_error(
+                        ErrorResponse::PayloadTooLarge,
                         false,
-                    );
-                    return ProcessResult::WriteError(resp);
+                    ));
                 }
 
                 let has_body = content_length.is_some_and(|cl| cl > 0) || chunked;
@@ -157,26 +155,18 @@ impl Conn {
             }
             Err(CodecError::Incomplete) => {
                 if self.buf.len() >= codec::MAX_HEADER_BUF {
-                    let resp = error_response(
-                        http::StatusCode::BAD_REQUEST,
-                        "request headers too large",
+                    return ProcessResult::WriteError(wire_error(
+                        ErrorResponse::RequestHeadersTooLarge,
                         false,
-                    );
-                    return ProcessResult::WriteError(resp);
+                    ));
                 }
                 ProcessResult::NeedRecv
             }
             Err(CodecError::Invalid(_)) => {
-                let resp = error_response(http::StatusCode::BAD_REQUEST, "bad request", false);
-                ProcessResult::WriteError(resp)
+                ProcessResult::WriteError(wire_error(ErrorResponse::BadRequest, false))
             }
             Err(CodecError::BodyTooLarge) => {
-                let resp = error_response(
-                    http::StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload too large",
-                    false,
-                );
-                ProcessResult::WriteError(resp)
+                ProcessResult::WriteError(wire_error(ErrorResponse::PayloadTooLarge, false))
             }
         }
     }
@@ -213,16 +203,13 @@ impl Conn {
                     return ProcessResult::NeedRecv;
                 }
                 Err(CodecError::BodyTooLarge) => {
-                    let resp = error_response(
-                        http::StatusCode::PAYLOAD_TOO_LARGE,
-                        "payload too large",
+                    return ProcessResult::WriteError(wire_error(
+                        ErrorResponse::PayloadTooLarge,
                         false,
-                    );
-                    return ProcessResult::WriteError(resp);
+                    ));
                 }
                 Err(CodecError::Invalid(_)) => {
-                    let resp = error_response(http::StatusCode::BAD_REQUEST, "bad request", false);
-                    return ProcessResult::WriteError(resp);
+                    return ProcessResult::WriteError(wire_error(ErrorResponse::BadRequest, false));
                 }
                 Err(CodecError::Incomplete) => {
                     return ProcessResult::NeedRecv;
@@ -271,15 +258,6 @@ impl Conn {
     pub fn build_harrow_request(&self) -> Option<http::Request<harrow_core::request::Body>> {
         let parsed = self.parsed.as_ref()?;
 
-        let mut builder = http::Request::builder()
-            .method(&parsed.method)
-            .uri(&parsed.uri)
-            .version(parsed.version);
-
-        for (name, value) in parsed.headers.iter() {
-            builder = builder.header(name, value);
-        }
-
         let body: harrow_core::request::Body = {
             use http_body_util::Full;
             harrow_core::request::Body::new(
@@ -288,7 +266,7 @@ impl Conn {
             )
         };
 
-        builder.body(body).ok()
+        build_request(parsed, body).ok()
     }
 
     /// Serialize a harrow response into self.response_buf and transition to Writing.
@@ -298,10 +276,13 @@ impl Conn {
     pub fn set_response(
         &mut self,
         mut parts: http::response::Parts,
-        body_data: Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>,
+        body_data: Result<Bytes, Box<dyn std::error::Error + Send + Sync>>,
     ) {
-        let has_content_length = parts.headers.contains_key(http::header::CONTENT_LENGTH);
         let keep_alive = self.keep_alive;
+        let is_head_request = self
+            .parsed
+            .as_ref()
+            .is_some_and(|parsed| parsed.method == http::Method::HEAD);
 
         if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
             parts.headers.insert(
@@ -310,20 +291,23 @@ impl Conn {
             );
         }
 
-        let mut head =
-            codec::write_response_head(parts.status, &parts.headers, !has_content_length);
+        let plan = ResponseWritePlan::new(&parts.headers, is_head_request, parts.status);
+        let mut head = codec::write_response_head(parts.status, &parts.headers, plan.is_chunked());
 
         match body_data {
-            Ok(data) => {
-                if has_content_length {
+            Ok(data) => match plan.mode {
+                ResponseBodyMode::None => {}
+                ResponseBodyMode::Fixed => {
                     head.extend_from_slice(&data);
-                } else if !data.is_empty() {
+                }
+                ResponseBodyMode::Chunked if !data.is_empty() => {
                     head.extend_from_slice(&codec::encode_chunk(&data));
                     head.extend_from_slice(codec::CHUNK_TERMINATOR);
-                } else {
+                }
+                ResponseBodyMode::Chunked => {
                     head.extend_from_slice(codec::CHUNK_TERMINATOR);
                 }
-            }
+            },
             Err(_) => {
                 head.clear();
                 head.extend_from_slice(
@@ -364,12 +348,25 @@ impl Conn {
     /// Applies to both header and body read phases — a slow client
     /// trickling body bytes is evicted the same as a slow header sender.
     pub fn read_timed_out(&self, timeout: Option<Duration>) -> bool {
-        matches!(self.state, ConnState::Headers | ConnState::Body { .. })
-            && timeout.is_some_and(|d| self.request_started_at.elapsed() >= d)
+        self.read_timed_out_for_phase(timeout, timeout)
+    }
+
+    pub fn read_timed_out_for_phase(
+        &self,
+        header_timeout: Option<Duration>,
+        body_timeout: Option<Duration>,
+    ) -> bool {
+        let timeout = match self.state {
+            ConnState::Headers => header_timeout,
+            ConnState::Body { .. } => body_timeout,
+            _ => None,
+        };
+
+        timeout.is_some_and(|d| self.request_started_at.elapsed() >= d)
     }
 }
 
-fn error_response(status: http::StatusCode, body: &'static str, keep_alive: bool) -> Vec<u8> {
+fn wire_error(error: ErrorResponse, keep_alive: bool) -> Vec<u8> {
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
@@ -377,14 +374,14 @@ fn error_response(status: http::StatusCode, body: &'static str, keep_alive: bool
     );
     headers.insert(
         http::header::CONTENT_LENGTH,
-        body.len().to_string().parse().unwrap(),
+        error.body().len().to_string().parse().unwrap(),
     );
     if !keep_alive {
         headers.insert(http::header::CONNECTION, "close".parse().unwrap());
     }
 
-    let mut resp = codec::write_response_head(status, &headers, false);
-    resp.extend_from_slice(body.as_bytes());
+    let mut resp = codec::write_response_head(error.status(), &headers, false);
+    resp.extend_from_slice(error.body().as_bytes());
     resp
 }
 
@@ -563,6 +560,88 @@ mod tests {
         let response = String::from_utf8_lossy(&conn.response_buf);
         assert!(response.contains("connection: close\r\n"));
         assert!(response.contains("transfer-encoding: chunked\r\n"));
+    }
+
+    #[test]
+    fn set_response_omits_chunked_for_bodyless_status() {
+        let mut conn = new_conn();
+        let parts = http::Response::builder()
+            .status(http::StatusCode::NO_CONTENT)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        conn.set_response(parts, Ok(Bytes::from_static(b"ignored")));
+
+        let response = String::from_utf8_lossy(&conn.response_buf);
+        assert!(response.starts_with("HTTP/1.1 204 No Content\r\n"));
+        assert!(!response.contains("transfer-encoding: chunked\r\n"));
+        assert!(response.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn set_response_omits_head_body_bytes() {
+        let mut conn = new_conn();
+        conn.parsed = Some(ParsedRequest {
+            method: http::Method::HEAD,
+            uri: "/".parse().unwrap(),
+            version: http::Version::HTTP_11,
+            headers: http::HeaderMap::new(),
+            header_len: 0,
+            keep_alive: true,
+            content_length: None,
+            chunked: false,
+            expect_continue: false,
+        });
+        let parts = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_LENGTH, "5")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        conn.set_response(parts, Ok(Bytes::from_static(b"hello")));
+
+        let response = String::from_utf8_lossy(&conn.response_buf);
+        assert!(response.contains("content-length: 5\r\n"));
+        assert!(response.ends_with("\r\n\r\n"));
+        assert!(!response.ends_with("\r\n\r\nhello"));
+    }
+
+    #[test]
+    fn read_timed_out_uses_header_timeout_for_headers_state() {
+        let mut conn = new_conn();
+        conn.request_started_at = Instant::now() - Duration::from_secs(2);
+        assert!(
+            conn.read_timed_out_for_phase(
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(10)),
+            )
+        );
+    }
+
+    #[test]
+    fn read_timed_out_uses_body_timeout_for_body_state() {
+        let mut conn = new_conn();
+        conn.state = ConnState::Body {
+            content_length: Some(5),
+            chunked: false,
+        };
+        conn.request_started_at = Instant::now() - Duration::from_secs(2);
+        assert!(
+            !conn.read_timed_out_for_phase(
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(3)),
+            )
+        );
+        assert!(
+            conn.read_timed_out_for_phase(
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(1)),
+            )
+        );
     }
 
     // --- EOF ---
