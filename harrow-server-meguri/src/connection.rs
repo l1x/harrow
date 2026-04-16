@@ -1,35 +1,42 @@
 //! Connection state machine for the meguri server.
 //!
-//! Each connection tracks its own read buffer, parse state, and response
-//! serialization. The main loop drives transitions via CQE completions.
+//! Each connection tracks its own read buffer, parse state, request-body pump,
+//! and response serialization. The main loop drives transitions via CQE
+//! completions plus periodic dispatch wake ticks.
 //!
 //! This module is platform-independent (no io_uring dependency) so the
 //! FSM can be unit-tested on macOS.
 
 #![allow(dead_code)] // FSM types are only used by the Linux event loop
 
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::os::fd::RawFd;
+use std::rc::{Rc, Weak};
+use std::sync::mpsc;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes, BytesMut};
-use http_body_util::BodyExt;
+use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body_util::{BodyExt, Full};
 
-use harrow_codec_h1::{self as codec, CodecError, ParsedRequest};
+use harrow_codec_h1::{self as codec, CodecError, ParsedRequest, PayloadDecoder, PayloadItem};
+use harrow_core::request::Body;
 use harrow_server::h1::{
     ErrorResponse, ResponseBodyMode, ResponseWritePlan, build_request, request_exceeds_body_limit,
 };
+
+const MAX_REQUEST_BODY_BUFFER_SIZE: usize = 32 * 1024;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Connection states in the lifecycle.
 #[derive(Debug)]
 pub(crate) enum ConnState {
     /// Waiting for header bytes to arrive via RECV completion.
     Headers,
-    /// Headers parsed; waiting for body bytes.
-    Body {
-        content_length: Option<u64>,
-        chunked: bool,
-    },
-    /// Dispatching request through Harrow pipeline (blocking).
+    /// Request has been handed to Harrow and may still be pumping body bytes.
     Dispatching,
     /// Writing serialized response bytes to the socket.
     Writing,
@@ -38,16 +45,26 @@ pub(crate) enum ConnState {
     Closed,
 }
 
+/// Result sent back from the local Tokio task once dispatch completes.
+pub(crate) struct DispatchResult {
+    pub parts: http::response::Parts,
+    pub body_data: Result<Bytes, BoxError>,
+}
+
 /// Per-connection state.
 pub(crate) struct Conn {
     pub fd: RawFd,
     pub state: ConnState,
     /// Read buffer: holds raw bytes from RECV completions.
     pub buf: BytesMut,
-    /// Parsed request headers (set after Headers -> Body/Dispatching transition).
+    /// Parsed request headers for the active request.
     pub parsed: Option<ParsedRequest>,
-    /// Body bytes collected so far (for Content-Length bodies).
-    pub body_bytes: BytesMut,
+    /// Live request body pump for streaming request payloads into the handler.
+    request_body: Option<RequestBodyState>,
+    /// Request body handed to Harrow when dispatch starts.
+    pending_request_body: Option<Body>,
+    /// Completion receiver for the spawned dispatch task.
+    dispatch_rx: Option<mpsc::Receiver<DispatchResult>>,
     /// Serialized response bytes to write.
     pub response_buf: Vec<u8>,
     /// Number of response bytes already written.
@@ -64,9 +81,9 @@ pub(crate) struct Conn {
     pub request_started_at: Instant,
 }
 
-/// Result of processing a RECV completion on a connection.
+/// Result of processing bytes from a RECV completion.
 pub(crate) enum ProcessResult {
-    /// Submit a RECV SQE (need more data).
+    /// Submit a RECV SQE (need more header bytes).
     NeedRecv,
     /// Dispatch the request through Harrow.
     Dispatch,
@@ -74,6 +91,20 @@ pub(crate) enum ProcessResult {
     WriteError(Vec<u8>),
     /// Connection should be closed (clean close or error).
     Close,
+}
+
+/// Result of pumping request-body bytes into the live request body queue.
+pub(crate) enum BodyPumpResult {
+    /// More bytes are needed from the socket.
+    NeedRecv,
+    /// The in-memory body buffer is full; stop reading until the handler drains it.
+    Blocked,
+    /// Reached request-body EOF.
+    Eof,
+    /// The handler dropped the request body before EOF.
+    ReceiverClosed,
+    /// The request body is malformed or exceeded policy.
+    ResponseError(ErrorResponse),
 }
 
 /// Result of processing a WRITE completion.
@@ -94,7 +125,9 @@ impl Conn {
             state: ConnState::Headers,
             buf: BytesMut::with_capacity(codec::DEFAULT_BUFFER_SIZE),
             parsed: None,
-            body_bytes: BytesMut::new(),
+            request_body: None,
+            pending_request_body: None,
+            dispatch_rx: None,
             response_buf: Vec::new(),
             response_written: 0,
             keep_alive: true,
@@ -105,7 +138,7 @@ impl Conn {
         }
     }
 
-    /// Process bytes from a RECV completion. Returns the next action.
+    /// Process bytes from a RECV completion while waiting for request headers.
     pub fn on_recv(&mut self, nbytes: usize, max_body: usize) -> ProcessResult {
         if nbytes == 0 {
             return ProcessResult::Close;
@@ -113,11 +146,8 @@ impl Conn {
 
         match self.state {
             ConnState::Headers => self.process_headers(max_body),
-            ConnState::Body {
-                content_length,
-                chunked,
-            } => self.process_body(content_length, chunked, max_body),
-            _ => ProcessResult::Close, // shouldn't get RECV in other states
+            ConnState::Dispatching => ProcessResult::Dispatch,
+            _ => ProcessResult::Close,
         }
     }
 
@@ -125,9 +155,7 @@ impl Conn {
         match codec::try_parse_request(&self.buf) {
             Ok(parsed) => {
                 let header_len = parsed.header_len;
-                let keep_alive = parsed.keep_alive;
                 let content_length = parsed.content_length;
-                let chunked = parsed.chunked;
 
                 self.buf.advance(header_len);
 
@@ -138,20 +166,22 @@ impl Conn {
                     ));
                 }
 
-                let has_body = content_length.is_some_and(|cl| cl > 0) || chunked;
+                self.keep_alive = parsed.keep_alive;
+                self.request_body = None;
+                self.pending_request_body = None;
+
+                let has_body = content_length.is_some_and(|cl| cl > 0) || parsed.chunked;
                 if has_body {
-                    self.parsed = Some(parsed);
-                    self.state = ConnState::Body {
-                        content_length,
-                        chunked,
-                    };
-                    self.process_body(content_length, chunked, max_body)
+                    let (request_body, body) = RequestBodyState::start(&parsed);
+                    self.request_body = Some(request_body);
+                    self.pending_request_body = Some(body);
                 } else {
-                    self.parsed = Some(parsed);
-                    self.keep_alive = keep_alive;
-                    self.state = ConnState::Dispatching;
-                    ProcessResult::Dispatch
+                    self.pending_request_body = Some(empty_body());
                 }
+
+                self.parsed = Some(parsed);
+                self.state = ConnState::Dispatching;
+                ProcessResult::Dispatch
             }
             Err(CodecError::Incomplete) => {
                 if self.buf.len() >= codec::MAX_HEADER_BUF {
@@ -171,71 +201,63 @@ impl Conn {
         }
     }
 
-    fn process_body(
-        &mut self,
-        content_length: Option<u64>,
-        chunked: bool,
-        max_body: usize,
-    ) -> ProcessResult {
-        // Move leftover bytes from buf to body_bytes.
-        if !self.buf.is_empty() {
-            self.body_bytes.extend_from_slice(&self.buf);
-            self.buf.clear();
-        }
+    pub fn build_harrow_request(&mut self) -> Option<http::Request<Body>> {
+        let parsed = self.parsed.as_ref()?;
+        let body = self.pending_request_body.take()?;
+        build_request(parsed, body).ok()
+    }
 
-        if chunked {
-            match codec::decode_chunked_with_limit(
-                &self.body_bytes,
-                (max_body > 0).then_some(max_body),
-            ) {
-                Ok(Some((body, consumed))) => {
-                    // Preserve pipelined data after the chunked body.
-                    let remaining = self.body_bytes.split_off(consumed);
-                    self.buf = remaining;
-                    self.body_bytes = BytesMut::from(&body[..]);
-                    if let Some(ref parsed) = self.parsed {
-                        self.keep_alive = parsed.keep_alive;
-                    }
-                    self.state = ConnState::Dispatching;
-                    return ProcessResult::Dispatch;
-                }
-                Ok(None) => {
-                    return ProcessResult::NeedRecv;
-                }
-                Err(CodecError::BodyTooLarge) => {
-                    return ProcessResult::WriteError(wire_error(
-                        ErrorResponse::PayloadTooLarge,
-                        false,
-                    ));
-                }
-                Err(CodecError::Invalid(_)) => {
-                    return ProcessResult::WriteError(wire_error(ErrorResponse::BadRequest, false));
-                }
-                Err(CodecError::Incomplete) => {
-                    return ProcessResult::NeedRecv;
-                }
+    pub fn set_dispatch_receiver(&mut self, rx: mpsc::Receiver<DispatchResult>) {
+        self.dispatch_rx = Some(rx);
+    }
+
+    pub fn poll_dispatch_result(&mut self) -> Option<Result<DispatchResult, ()>> {
+        let rx = self.dispatch_rx.as_ref()?;
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.dispatch_rx = None;
+                Some(Ok(result))
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.dispatch_rx = None;
+                Some(Err(()))
             }
         }
+    }
 
-        // Content-Length body.
-        let target = match content_length {
-            Some(0) | None => 0,
-            Some(len) => len as usize,
+    pub fn has_active_dispatch(&self) -> bool {
+        self.dispatch_rx.is_some()
+    }
+
+    pub fn request_body_in_progress(&self) -> bool {
+        self.request_body.is_some()
+    }
+
+    pub fn abort_request_body(&mut self) {
+        self.request_body = None;
+    }
+
+    pub fn pump_request_body(&mut self, max_body: usize) -> BodyPumpResult {
+        let Some(request_body) = self.request_body.as_mut() else {
+            return BodyPumpResult::Eof;
         };
 
-        if target == 0 || self.body_bytes.len() >= target {
-            // Split exactly at target — any excess is pipelined data.
-            if target > 0 && self.body_bytes.len() > target {
-                let remaining = self.body_bytes.split_off(target);
-                self.buf = remaining;
+        match request_body.pump(&mut self.buf, max_body) {
+            BodyPumpResult::Eof => {
+                self.request_body = None;
+                BodyPumpResult::Eof
             }
-            if let Some(ref parsed) = self.parsed {
-                self.keep_alive = parsed.keep_alive;
+            BodyPumpResult::ReceiverClosed => {
+                self.request_body = None;
+                BodyPumpResult::ReceiverClosed
             }
-            self.state = ConnState::Dispatching;
-            ProcessResult::Dispatch
-        } else {
-            ProcessResult::NeedRecv
+            BodyPumpResult::ResponseError(error) => {
+                self.request_body = None;
+                BodyPumpResult::ResponseError(error)
+            }
+            other => other,
         }
     }
 
@@ -246,7 +268,6 @@ impl Conn {
         if self.response_written < self.response_buf.len() {
             WriteResult::WriteMore
         } else if self.keep_alive {
-            // Reset for next request.
             self.reset();
             WriteResult::RecvNext
         } else {
@@ -254,29 +275,11 @@ impl Conn {
         }
     }
 
-    /// Build a harrow request from the parsed headers and body.
-    pub fn build_harrow_request(&self) -> Option<http::Request<harrow_core::request::Body>> {
-        let parsed = self.parsed.as_ref()?;
-
-        let body: harrow_core::request::Body = {
-            use http_body_util::Full;
-            harrow_core::request::Body::new(
-                Full::new(self.body_bytes.clone().freeze())
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { match e {} }),
-            )
-        };
-
-        build_request(parsed, body).ok()
-    }
-
-    /// Serialize a harrow response into self.response_buf and transition to Writing.
-    ///
-    /// `body_data` is the pre-collected response body (collected inside the
-    /// tokio runtime context during dispatch).
+    /// Serialize a Harrow response into `self.response_buf` and transition to Writing.
     pub fn set_response(
         &mut self,
         mut parts: http::response::Parts,
-        body_data: Result<Bytes, Box<dyn std::error::Error + Send + Sync>>,
+        body_data: Result<Bytes, BoxError>,
     ) {
         let keep_alive = self.keep_alive;
         let is_head_request = self
@@ -322,33 +325,43 @@ impl Conn {
         self.state = ConnState::Writing;
     }
 
+    pub fn set_error_response(&mut self, error: ErrorResponse) {
+        self.response_buf = wire_error(error, false);
+        self.response_written = 0;
+        self.keep_alive = false;
+        self.request_body = None;
+        self.pending_request_body = None;
+        self.dispatch_rx = None;
+        self.state = ConnState::Writing;
+    }
+
+    pub fn set_internal_server_error(&mut self) {
+        self.response_buf = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\nconnection: close\r\n\r\ninternal server error".to_vec();
+        self.response_written = 0;
+        self.keep_alive = false;
+        self.request_body = None;
+        self.pending_request_body = None;
+        self.dispatch_rx = None;
+        self.state = ConnState::Writing;
+    }
+
     /// Reset connection state for the next request (keep-alive).
     fn reset(&mut self) {
         self.state = ConnState::Headers;
         self.parsed = None;
-        self.body_bytes.clear();
+        self.request_body = None;
+        self.pending_request_body = None;
+        self.dispatch_rx = None;
         self.response_buf.clear();
         self.response_written = 0;
         self.keep_alive = true;
         self.request_started_at = Instant::now();
-        // Don't clear buf — leftover bytes from a pipelined request.
+        // Don't clear `buf` — leftover bytes from a pipelined request stay available.
     }
 
     /// Check whether the connection has exceeded its lifetime limit.
-    ///
-    /// Note: this measures wall-clock time since accept, which includes
-    /// time spent in synchronous dispatch (handler execution).  A slow
-    /// upstream call counts against the connection lifetime.
     pub fn is_expired(&self, max_lifetime: Option<Duration>) -> bool {
         max_lifetime.is_some_and(|d| self.accepted_at.elapsed() >= d)
-    }
-
-    /// Check whether the current request has exceeded the read timeout.
-    ///
-    /// Applies to both header and body read phases — a slow client
-    /// trickling body bytes is evicted the same as a slow header sender.
-    pub fn read_timed_out(&self, timeout: Option<Duration>) -> bool {
-        self.read_timed_out_for_phase(timeout, timeout)
     }
 
     pub fn read_timed_out_for_phase(
@@ -358,12 +371,265 @@ impl Conn {
     ) -> bool {
         let timeout = match self.state {
             ConnState::Headers => header_timeout,
-            ConnState::Body { .. } => body_timeout,
+            ConnState::Dispatching if self.request_body_in_progress() => body_timeout,
             _ => None,
         };
 
         timeout.is_some_and(|d| self.request_started_at.elapsed() >= d)
     }
+}
+
+struct RequestBodyState {
+    decoder: PayloadDecoder,
+    sender: PayloadSender,
+    pending_chunk: Option<Bytes>,
+}
+
+enum FlushResult {
+    Ready,
+    Blocked,
+    Dropped,
+}
+
+impl RequestBodyState {
+    fn start(parsed: &ParsedRequest) -> (Self, Body) {
+        let decoder = PayloadDecoder::from_parsed(parsed).expect("body-bearing request");
+        let (sender, body) = payload_channel(MAX_REQUEST_BODY_BUFFER_SIZE);
+        (
+            Self {
+                decoder,
+                sender,
+                pending_chunk: None,
+            },
+            body,
+        )
+    }
+
+    fn pump(&mut self, buf: &mut BytesMut, max_body: usize) -> BodyPumpResult {
+        loop {
+            match self.flush_pending_chunk() {
+                FlushResult::Ready => {}
+                FlushResult::Blocked => return BodyPumpResult::Blocked,
+                FlushResult::Dropped => return BodyPumpResult::ReceiverClosed,
+            }
+
+            match self.decoder.decode(buf, Some(max_body)) {
+                Err(err) => {
+                    return BodyPumpResult::ResponseError(ErrorResponse::from_codec_error(&err));
+                }
+                Ok(Some(PayloadItem::Chunk(chunk))) => {
+                    self.pending_chunk = Some(chunk);
+                }
+                Ok(Some(PayloadItem::Eof)) => {
+                    self.sender.feed_eof();
+                    return BodyPumpResult::Eof;
+                }
+                Ok(None) => {
+                    return BodyPumpResult::NeedRecv;
+                }
+            }
+        }
+    }
+
+    fn flush_pending_chunk(&mut self) -> FlushResult {
+        while let Some(chunk) = self.pending_chunk.as_mut() {
+            if chunk.is_empty() {
+                self.pending_chunk = None;
+                continue;
+            }
+
+            if self.sender.is_dropped() {
+                return FlushResult::Dropped;
+            }
+
+            let capacity = self.sender.available_capacity();
+            if capacity == 0 {
+                return FlushResult::Blocked;
+            }
+
+            let emitted = chunk.len().min(capacity);
+            let next = if emitted == chunk.len() {
+                self.pending_chunk.take().unwrap()
+            } else {
+                chunk.split_to(emitted)
+            };
+            self.sender.feed_data(next);
+        }
+
+        if self.sender.is_dropped() {
+            FlushResult::Dropped
+        } else {
+            FlushResult::Ready
+        }
+    }
+}
+
+fn payload_channel(max_buffered_bytes: usize) -> (PayloadSender, Body) {
+    let inner = Rc::new(PayloadInner::new(max_buffered_bytes));
+    let sender = PayloadSender {
+        inner: Rc::downgrade(&inner),
+    };
+    let body = Body::new(PayloadBody { inner });
+    (sender, body)
+}
+
+struct PayloadBody {
+    inner: Rc<PayloadInner>,
+}
+
+impl Drop for PayloadBody {
+    fn drop(&mut self) {
+        self.inner.receiver_dropped.set(true);
+        self.inner.wake_sender();
+    }
+}
+
+impl HttpBody for PayloadBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(chunk) = self.inner.pop_chunk() {
+            return Poll::Ready(Some(Ok(Frame::data(chunk))));
+        }
+
+        if self.inner.closed.get() {
+            return Poll::Ready(None);
+        }
+
+        self.inner.register_receiver(cx.waker());
+
+        if let Some(chunk) = self.inner.pop_chunk() {
+            Poll::Ready(Some(Ok(Frame::data(chunk))))
+        } else if self.inner.closed.get() {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.closed.get() && self.inner.buffered_bytes.get() == 0
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
+}
+
+struct PayloadSender {
+    inner: Weak<PayloadInner>,
+}
+
+impl PayloadSender {
+    fn available_capacity(&self) -> usize {
+        self.inner
+            .upgrade()
+            .map_or(0, |inner| inner.available_capacity())
+    }
+
+    fn is_dropped(&self) -> bool {
+        self.inner
+            .upgrade()
+            .is_none_or(|inner| inner.receiver_dropped.get())
+    }
+
+    fn feed_data(&self, data: Bytes) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.push_chunk(data);
+        }
+    }
+
+    fn feed_eof(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.closed.set(true);
+            inner.wake_receiver();
+            inner.wake_sender();
+        }
+    }
+}
+
+struct PayloadInner {
+    buffered_bytes: Cell<usize>,
+    closed: Cell<bool>,
+    receiver_dropped: Cell<bool>,
+    chunks: RefCell<VecDeque<Bytes>>,
+    max_buffered_bytes: usize,
+    receiver_waker: RefCell<Option<Waker>>,
+    sender_waker: RefCell<Option<Waker>>,
+}
+
+impl PayloadInner {
+    fn new(max_buffered_bytes: usize) -> Self {
+        Self {
+            buffered_bytes: Cell::new(0),
+            closed: Cell::new(false),
+            receiver_dropped: Cell::new(false),
+            chunks: RefCell::new(VecDeque::new()),
+            max_buffered_bytes,
+            receiver_waker: RefCell::new(None),
+            sender_waker: RefCell::new(None),
+        }
+    }
+
+    fn available_capacity(&self) -> usize {
+        self.max_buffered_bytes
+            .saturating_sub(self.buffered_bytes.get())
+    }
+
+    fn push_chunk(&self, chunk: Bytes) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.buffered_bytes
+            .set(self.buffered_bytes.get().saturating_add(chunk.len()));
+        self.chunks.borrow_mut().push_back(chunk);
+        self.wake_receiver();
+    }
+
+    fn pop_chunk(&self) -> Option<Bytes> {
+        let chunk = self.chunks.borrow_mut().pop_front()?;
+        self.buffered_bytes
+            .set(self.buffered_bytes.get().saturating_sub(chunk.len()));
+        self.wake_sender();
+        Some(chunk)
+    }
+
+    fn register_receiver(&self, waker: &Waker) {
+        Self::register_waker(&self.receiver_waker, waker);
+    }
+
+    fn register_sender(&self, waker: &Waker) {
+        Self::register_waker(&self.sender_waker, waker);
+    }
+
+    fn register_waker(slot: &RefCell<Option<Waker>>, waker: &Waker) {
+        let mut slot = slot.borrow_mut();
+        let should_replace = slot.as_ref().is_none_or(|stored| !stored.will_wake(waker));
+        if should_replace {
+            *slot = Some(waker.clone());
+        }
+    }
+
+    fn wake_receiver(&self) {
+        if let Some(waker) = self.receiver_waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+
+    fn wake_sender(&self) {
+        if let Some(waker) = self.sender_waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+}
+
+fn empty_body() -> Body {
+    Body::new(Full::new(Bytes::new()).map_err(|e| -> BoxError { match e {} }))
 }
 
 fn wire_error(error: ErrorResponse, keep_alive: bool) -> Vec<u8> {
@@ -387,10 +653,26 @@ fn wire_error(error: ErrorResponse, keep_alive: bool) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::poll_fn;
+    use std::pin::Pin;
+
     use super::*;
 
     fn new_conn() -> Conn {
         Conn::new(0)
+    }
+
+    fn collect_body(body: Body) -> Bytes {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                body.collect()
+                    .await
+                    .expect("body collect should succeed")
+                    .to_bytes()
+            })
     }
 
     // --- Header parsing ---
@@ -404,6 +686,7 @@ mod tests {
         assert!(matches!(result, ProcessResult::Dispatch));
         assert!(matches!(conn.state, ConnState::Dispatching));
         assert!(conn.keep_alive);
+        assert!(!conn.request_body_in_progress());
     }
 
     #[test]
@@ -433,67 +716,39 @@ mod tests {
         assert!(!conn.keep_alive);
     }
 
-    // --- Content-Length body ---
+    // --- Streaming request bodies ---
 
     #[test]
-    fn content_length_body_complete() {
+    fn content_length_body_streams_without_prebuffering() {
         let mut conn = new_conn();
         conn.buf.extend_from_slice(
             b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
         );
         let result = conn.on_recv(conn.buf.len(), 1024);
         assert!(matches!(result, ProcessResult::Dispatch));
-        assert_eq!(conn.body_bytes.as_ref(), b"hello");
+        assert!(conn.request_body_in_progress());
+
+        let request = conn.build_harrow_request().expect("request");
+        assert!(matches!(conn.pump_request_body(1024), BodyPumpResult::Eof));
+        assert_eq!(
+            collect_body(request.into_body()),
+            Bytes::from_static(b"hello")
+        );
     }
 
     #[test]
-    fn content_length_body_needs_more() {
+    fn content_length_body_needs_more_bytes() {
         let mut conn = new_conn();
         conn.buf.extend_from_slice(
             b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
         );
         let result = conn.on_recv(conn.buf.len(), 1024);
-        assert!(matches!(result, ProcessResult::NeedRecv));
-        assert!(matches!(conn.state, ConnState::Body { .. }));
-    }
-
-    #[test]
-    fn content_length_body_preserves_pipelined_data() {
-        let mut conn = new_conn();
-        conn.buf.extend_from_slice(
-            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        let result = conn.on_recv(conn.buf.len(), 1024);
         assert!(matches!(result, ProcessResult::Dispatch));
-        assert_eq!(conn.body_bytes.as_ref(), b"hello");
-        // Pipelined request preserved in buf.
-        assert_eq!(
-            conn.buf.as_ref(),
-            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn content_length_too_large() {
-        let mut conn = new_conn();
-        conn.buf.extend_from_slice(
-            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9999\r\n\r\n",
-        );
-        let result = conn.on_recv(conn.buf.len(), 100);
-        assert!(matches!(result, ProcessResult::WriteError(_)));
-    }
-
-    // --- Chunked body ---
-
-    #[test]
-    fn chunked_body_complete() {
-        let mut conn = new_conn();
-        conn.buf.extend_from_slice(
-            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
-        );
-        let result = conn.on_recv(conn.buf.len(), 1024);
-        assert!(matches!(result, ProcessResult::Dispatch));
-        assert_eq!(conn.body_bytes.as_ref(), b"hello");
+        assert!(matches!(
+            conn.pump_request_body(1024),
+            BodyPumpResult::NeedRecv
+        ));
+        assert!(conn.request_body_in_progress());
     }
 
     #[test]
@@ -504,11 +759,68 @@ mod tests {
         );
         let result = conn.on_recv(conn.buf.len(), 1024);
         assert!(matches!(result, ProcessResult::Dispatch));
-        assert_eq!(conn.body_bytes.as_ref(), b"hello");
+        let request = conn.build_harrow_request().expect("request");
+        assert!(matches!(conn.pump_request_body(1024), BodyPumpResult::Eof));
+        assert_eq!(
+            collect_body(request.into_body()),
+            Bytes::from_static(b"hello")
+        );
         assert_eq!(
             conn.buf.as_ref(),
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn request_body_backpressures_by_buffered_bytes() {
+        let oversized = "a".repeat(MAX_REQUEST_BODY_BUFFER_SIZE + 1);
+        let mut conn = new_conn();
+        conn.buf.extend_from_slice(
+            format!(
+                "POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                oversized.len(),
+                oversized
+            )
+            .as_bytes(),
+        );
+        let result = conn.on_recv(conn.buf.len(), MAX_REQUEST_BODY_BUFFER_SIZE + 1);
+        assert!(matches!(result, ProcessResult::Dispatch));
+        let request = conn.build_harrow_request().expect("request");
+
+        let pump = conn.pump_request_body(MAX_REQUEST_BODY_BUFFER_SIZE + 1);
+        assert!(matches!(pump, BodyPumpResult::Blocked));
+
+        let mut body = request.into_body();
+        let first = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                    .await
+                    .expect("expected first frame")
+                    .expect("frame should be ok")
+                    .into_data()
+                    .expect("expected data frame")
+            });
+        assert_eq!(first.len(), MAX_REQUEST_BODY_BUFFER_SIZE);
+
+        assert!(matches!(
+            conn.pump_request_body(MAX_REQUEST_BODY_BUFFER_SIZE + 1),
+            BodyPumpResult::Eof
+        ));
+        let rest = collect_body(body);
+        assert_eq!(rest, Bytes::from_static(b"a"));
+    }
+
+    #[test]
+    fn content_length_too_large() {
+        let mut conn = new_conn();
+        conn.buf.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9999\r\n\r\n",
+        );
+        let result = conn.on_recv(conn.buf.len(), 100);
+        assert!(matches!(result, ProcessResult::WriteError(_)));
     }
 
     // --- Write completion ---
@@ -555,7 +867,7 @@ mod tests {
             .into_parts()
             .0;
 
-        conn.set_response(parts, Ok(bytes::Bytes::new()));
+        conn.set_response(parts, Ok(Bytes::new()));
 
         let response = String::from_utf8_lossy(&conn.response_buf);
         assert!(response.contains("connection: close\r\n"));
@@ -623,12 +935,12 @@ mod tests {
     }
 
     #[test]
-    fn read_timed_out_uses_body_timeout_for_body_state() {
+    fn read_timed_out_uses_body_timeout_for_body_phase() {
         let mut conn = new_conn();
-        conn.state = ConnState::Body {
-            content_length: Some(5),
-            chunked: false,
-        };
+        conn.buf.extend_from_slice(
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
+        );
+        let _ = conn.on_recv(conn.buf.len(), 1024);
         conn.request_started_at = Instant::now() - Duration::from_secs(2);
         assert!(
             !conn.read_timed_out_for_phase(
