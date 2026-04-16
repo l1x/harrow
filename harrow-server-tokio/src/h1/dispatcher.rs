@@ -6,6 +6,9 @@ use tokio::io::AsyncWriteExt;
 
 use harrow_core::dispatch::{self, SharedState};
 use harrow_io::BufPool;
+use harrow_server::h1::{
+    EarlyResponseMode, RequestBodyDecision, decide_request_body_progress, early_response_control,
+};
 
 use crate::ServerConfig;
 use crate::h1::{error, request_body, request_head, response};
@@ -74,18 +77,25 @@ where
             tokio::select! {
                 biased;
                 response = &mut response_fut => {
-                    connection_reusable = false;
+                    let control = early_response_control(EarlyResponseMode::DrainRequestBody);
+                    connection_reusable = control.keep_alive;
                     request_body_state.detach_receiver();
-                    drain_request_body = true;
+                    drain_request_body = control.drain_request_body;
                     break response;
                 }
                 pump = request_body_state.pump_once(&mut stream, &mut buf) => {
-                    match pump {
-                        request_body::PumpStatus::Progress => {}
-                        request_body::PumpStatus::Eof => {
+                    match decide_request_body_progress(
+                        pump,
+                        connection_reusable,
+                        EarlyResponseMode::DrainRequestBody,
+                    ) {
+                        RequestBodyDecision::Continue => {}
+                        RequestBodyDecision::BodyComplete { keep_alive, drain_request_body: should_drain } => {
                             request_body_complete = true;
+                            connection_reusable = keep_alive;
+                            drain_request_body |= should_drain;
                         }
-                        request_body::PumpStatus::ResponseError { error: error_response } => {
+                        RequestBodyDecision::WriteError(error_response) => {
                             error::write_error(
                                 &mut stream,
                                 error_response.status_u16(),
@@ -94,13 +104,8 @@ where
                             .await;
                             break 'connection;
                         }
-                        request_body::PumpStatus::ConnectionClosed => {
+                        RequestBodyDecision::CloseConnection => {
                             break 'connection;
-                        }
-                        request_body::PumpStatus::ReceiverClosed => {
-                            request_body_complete = true;
-                            connection_reusable = false;
-                            drain_request_body = true;
                         }
                     }
                 }

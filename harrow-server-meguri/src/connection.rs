@@ -24,8 +24,9 @@ use tokio::sync::mpsc;
 use harrow_codec_h1::{self as codec, CodecError, ParsedRequest, PayloadDecoder, PayloadItem};
 use harrow_core::request::Body;
 use harrow_server::h1::{
-    ErrorResponse, ResponseBodyMode, build_request, finish_fixed_response_body, prepare_response,
-    record_fixed_response_bytes, request_exceeds_body_limit,
+    EarlyResponseMode, ErrorResponse, ResponseBodyMode, build_request, early_response_control,
+    finish_fixed_response_body, prepare_response, record_fixed_response_bytes,
+    request_exceeds_body_limit,
 };
 
 const MAX_REQUEST_BODY_BUFFER_SIZE: usize = 32 * 1024;
@@ -288,7 +289,8 @@ impl Conn {
                     if matches!(self.state, ConnState::Dispatching)
                         && self.request_body_in_progress()
                     {
-                        self.keep_alive = false;
+                        let control = early_response_control(EarlyResponseMode::DropRequestBody);
+                        self.keep_alive = control.keep_alive;
                         self.abort_request_body();
                     }
 

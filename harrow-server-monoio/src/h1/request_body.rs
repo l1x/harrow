@@ -12,7 +12,7 @@ use monoio::net::TcpStream;
 use harrow_codec_h1::{CONTINUE_100, ParsedRequest, PayloadDecoder, PayloadItem};
 use harrow_core::dispatch::SharedState;
 use harrow_core::request::Body;
-use harrow_server::h1::ErrorResponse;
+use harrow_server::h1::{ErrorResponse, RequestBodyProgress};
 
 use crate::buffer::DEFAULT_BUFFER_SIZE;
 use crate::h1::dispatcher::H1Connection;
@@ -26,14 +26,6 @@ const MAX_REQUEST_BODY_BUFFER_SIZE: usize = 32 * 1024;
 enum QueueStatus {
     Ready,
     Dropped,
-}
-
-pub(crate) enum PumpStatus {
-    Progress,
-    Eof,
-    ResponseError { error: ErrorResponse },
-    ConnectionClosed,
-    ReceiverClosed,
 }
 
 pub(crate) struct RequestBodyState {
@@ -89,9 +81,9 @@ impl RequestBodyState {
         self.sender = None;
     }
 
-    pub(crate) async fn pump_once(&mut self, conn: &mut H1Connection) -> PumpStatus {
+    pub(crate) async fn pump_once(&mut self, conn: &mut H1Connection) -> RequestBodyProgress {
         if self.decoder.is_none() {
-            return PumpStatus::Eof;
+            return RequestBodyProgress::Eof;
         }
 
         loop {
@@ -99,7 +91,7 @@ impl RequestBodyState {
                 QueueStatus::Ready => {}
                 QueueStatus::Dropped => {
                     self.abort();
-                    return PumpStatus::ReceiverClosed;
+                    return RequestBodyProgress::ReceiverClosed;
                 }
             }
 
@@ -117,7 +109,7 @@ impl RequestBodyState {
                 }
                 Ok(Some(PayloadItem::Eof)) => {
                     self.finish_eof();
-                    return PumpStatus::Eof;
+                    return RequestBodyProgress::Eof;
                 }
                 Ok(None) => {}
             }
@@ -159,10 +151,10 @@ impl RequestBodyState {
         sender.ready().await
     }
 
-    async fn send_chunk(&mut self, mut chunk: Bytes) -> PumpStatus {
+    async fn send_chunk(&mut self, mut chunk: Bytes) -> RequestBodyProgress {
         let Some(sender) = self.sender.as_ref() else {
             self.abort();
-            return PumpStatus::ReceiverClosed;
+            return RequestBodyProgress::ReceiverClosed;
         };
 
         while !chunk.is_empty() {
@@ -170,7 +162,7 @@ impl RequestBodyState {
                 QueueStatus::Ready => {}
                 QueueStatus::Dropped => {
                     self.abort();
-                    return PumpStatus::ReceiverClosed;
+                    return RequestBodyProgress::ReceiverClosed;
                 }
             }
 
@@ -188,17 +180,17 @@ impl RequestBodyState {
             sender.feed_data(next);
         }
 
-        PumpStatus::Progress
+        RequestBodyProgress::Progress
     }
 
-    fn finish_response_error(&mut self, error: ErrorResponse) -> PumpStatus {
+    fn finish_response_error(&mut self, error: ErrorResponse) -> RequestBodyProgress {
         self.abort();
-        PumpStatus::ResponseError { error }
+        RequestBodyProgress::ResponseError(error)
     }
 
-    fn finish_connection_closed(&mut self) -> PumpStatus {
+    fn finish_connection_closed(&mut self) -> RequestBodyProgress {
         self.abort();
-        PumpStatus::ConnectionClosed
+        RequestBodyProgress::ConnectionClosed
     }
 
     fn finish_eof(&mut self) {

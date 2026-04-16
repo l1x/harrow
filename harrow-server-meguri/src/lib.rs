@@ -58,6 +58,8 @@ type BoxError = Box<dyn Error + Send + Sync>;
 use harrow_core::dispatch::{self, SharedState};
 #[cfg(target_os = "linux")]
 use harrow_core::route::App;
+#[cfg(target_os = "linux")]
+use harrow_server::h1::{EarlyResponseMode, early_response_control};
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -1318,7 +1320,8 @@ fn advance_dispatching_connection(
         match dispatch_result {
             Ok(response) => {
                 if conns[conn_idx].request_body_in_progress() {
-                    conns[conn_idx].keep_alive = false;
+                    let control = early_response_control(EarlyResponseMode::DropRequestBody);
+                    conns[conn_idx].keep_alive = control.keep_alive;
                     conns[conn_idx].abort_request_body();
                 }
                 start_response_stream_task(conn_idx, conns, local, response);
@@ -1353,8 +1356,9 @@ fn advance_dispatching_connection(
         }
         connection::BodyPumpResult::Blocked | connection::BodyPumpResult::Eof => {}
         connection::BodyPumpResult::ReceiverClosed => {
+            let control = early_response_control(EarlyResponseMode::DropRequestBody);
             let conn = &mut conns[conn_idx];
-            conn.keep_alive = false;
+            conn.keep_alive = control.keep_alive;
             conn.abort_request_body();
         }
         connection::BodyPumpResult::ResponseError(error) => {

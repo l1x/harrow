@@ -135,6 +135,68 @@ pub fn finish_fixed_response_body(
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EarlyResponseMode {
+    DrainRequestBody,
+    DropRequestBody,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct EarlyResponseControl {
+    pub keep_alive: bool,
+    pub drain_request_body: bool,
+}
+
+pub fn early_response_control(mode: EarlyResponseMode) -> EarlyResponseControl {
+    EarlyResponseControl {
+        keep_alive: false,
+        drain_request_body: matches!(mode, EarlyResponseMode::DrainRequestBody),
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RequestBodyProgress {
+    Progress,
+    Eof,
+    ResponseError(ErrorResponse),
+    ConnectionClosed,
+    ReceiverClosed,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RequestBodyDecision {
+    Continue,
+    BodyComplete {
+        keep_alive: bool,
+        drain_request_body: bool,
+    },
+    WriteError(ErrorResponse),
+    CloseConnection,
+}
+
+pub fn decide_request_body_progress(
+    progress: RequestBodyProgress,
+    keep_alive: bool,
+    early_response_mode: EarlyResponseMode,
+) -> RequestBodyDecision {
+    match progress {
+        RequestBodyProgress::Progress => RequestBodyDecision::Continue,
+        RequestBodyProgress::Eof => RequestBodyDecision::BodyComplete {
+            keep_alive,
+            drain_request_body: false,
+        },
+        RequestBodyProgress::ResponseError(error) => RequestBodyDecision::WriteError(error),
+        RequestBodyProgress::ConnectionClosed => RequestBodyDecision::CloseConnection,
+        RequestBodyProgress::ReceiverClosed => {
+            let control = early_response_control(early_response_mode);
+            RequestBodyDecision::BodyComplete {
+                keep_alive: control.keep_alive,
+                drain_request_body: control.drain_request_body,
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorResponse {
     BadRequest,
     RequestHeadersTooLarge,
@@ -339,6 +401,51 @@ mod tests {
 
         let err = finish_fixed_response_body(4, 5).expect_err("short body should fail");
         assert!(err.to_string().contains("shorter than declared"));
+    }
+
+    #[test]
+    fn request_body_progress_decision_matches_backend_policies() {
+        assert_eq!(
+            decide_request_body_progress(
+                RequestBodyProgress::Eof,
+                true,
+                EarlyResponseMode::DrainRequestBody,
+            ),
+            RequestBodyDecision::BodyComplete {
+                keep_alive: true,
+                drain_request_body: false,
+            }
+        );
+        assert_eq!(
+            decide_request_body_progress(
+                RequestBodyProgress::ReceiverClosed,
+                true,
+                EarlyResponseMode::DrainRequestBody,
+            ),
+            RequestBodyDecision::BodyComplete {
+                keep_alive: false,
+                drain_request_body: true,
+            }
+        );
+        assert_eq!(
+            decide_request_body_progress(
+                RequestBodyProgress::ReceiverClosed,
+                true,
+                EarlyResponseMode::DropRequestBody,
+            ),
+            RequestBodyDecision::BodyComplete {
+                keep_alive: false,
+                drain_request_body: false,
+            }
+        );
+        assert_eq!(
+            decide_request_body_progress(
+                RequestBodyProgress::ResponseError(ErrorResponse::PayloadTooLarge),
+                true,
+                EarlyResponseMode::DropRequestBody,
+            ),
+            RequestBodyDecision::WriteError(ErrorResponse::PayloadTooLarge)
+        );
     }
 
     #[test]

@@ -19,6 +19,9 @@ use bytes::BytesMut;
 use monoio::net::TcpStream;
 
 use harrow_core::dispatch::SharedState;
+use harrow_server::h1::{
+    EarlyResponseMode, RequestBodyDecision, decide_request_body_progress, early_response_control,
+};
 
 use crate::h1::request_body;
 use crate::o11y::ConnectionMetrics;
@@ -140,26 +143,28 @@ impl H1Connection {
 
                 monoio::select! {
                     response = &mut response_fut => {
-                        connection_reusable = false;
+                        let control = early_response_control(EarlyResponseMode::DropRequestBody);
+                        connection_reusable = control.keep_alive;
                         request_body_state.abort();
                         break response;
                     }
                     pump = request_body_state.pump_once(self) => {
-                        match pump {
-                            request_body::PumpStatus::Progress => {}
-                            request_body::PumpStatus::Eof => {
+                        match decide_request_body_progress(
+                            pump,
+                            connection_reusable,
+                            EarlyResponseMode::DropRequestBody,
+                        ) {
+                            RequestBodyDecision::Continue => {}
+                            RequestBodyDecision::BodyComplete { keep_alive, .. } => {
                                 body_complete = true;
+                                connection_reusable = keep_alive;
                             }
-                            request_body::PumpStatus::ResponseError { error } => {
+                            RequestBodyDecision::WriteError(error) => {
                                 self.write_status(error.status(), error.body()).await?;
                                 break 'connection;
                             }
-                            request_body::PumpStatus::ConnectionClosed => {
+                            RequestBodyDecision::CloseConnection => {
                                 break 'connection;
-                            }
-                            request_body::PumpStatus::ReceiverClosed => {
-                                body_complete = true;
-                                connection_reusable = false;
                             }
                         }
                     }
