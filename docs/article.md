@@ -1,7 +1,7 @@
 # Harrow Performance Journal
 
 **Status:** living document  
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-21
 
 > Historical engineering log. For the current product scope and support
 > policy, see [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md).
@@ -43,6 +43,11 @@ reconstructing it from commit history and half-remembered flamegraphs.
 - Fixing that one framing bug moved Harrow Tokio from about
   **786k-841k rps** to about **1.72M-1.73M rps** on the non-`perf` `/text`
   benchmark, essentially eliminating the old baseline gap with `ntex`.
+- On 2026-04-21, the remaining large `/json/10kb` gap turned out to be mostly
+  **per-request JSON serialization/materialization**, not the transport path.
+  Pooled JSON scratch buffers and owned `Bytes` moved Harrow Tokio from about
+  **920k -> 1.09M rps** on dynamic `10kb` JSON, and a pre-serialized
+  `10kb-static` control route reached about **1.27M rps**.
 - We also benchmarked the middleware architecture directly instead of arguing in
   the abstract. Pure Tower-style static layers are effectively allocation-flat.
   Harrow's dynamic middleware costs about **+728 bytes and +2 allocs per noop
@@ -66,6 +71,45 @@ That third constraint matters. A lot of Rust performance discussions collapse
 into "dynamic dispatch bad, monomorphization good." That is too simple to be
 useful. The real question is always: **what did the extra flexibility cost on
 the workload we actually care about?**
+
+## 2026-04-21: Large JSON Was Mostly Serialization
+
+After the `/text` fix, the next obvious question was whether Harrow still had a
+meaningful backend/runtime problem on larger payloads. The answer is: not
+really. The remaining large JSON gap is now mostly body construction CPU.
+
+We added three changes:
+
+- pooled thread-local JSON scratch buffers in `harrow-serde`
+- zero-copy owned `Bytes` handoff into the response path
+- a benchmark-only `/json/10kb-static` route to separate framework overhead
+  from `serde_json` cost
+
+Fresh remote results on `c8gn.12xlarge`, `spinr`, `128` connections:
+
+| Case | Harrow Tokio | ntex Tokio |
+|---|---:|---:|
+| `/json/1kb` | `2,091,574 rps`, `p99 0.14ms` | `2,272,021 rps`, `p99 0.13ms` |
+| `/json/10kb` | `1,093,032 rps`, `p99 0.30ms` | `1,164,649 rps`, `p99 0.29ms` |
+
+Control case:
+
+| Case | Harrow Tokio |
+|---|---:|
+| `/json/10kb-static` | `1,270,223 rps`, `p99 0.33ms` |
+
+That changed the interpretation of the problem:
+
+- dynamic `/json/10kb` improved from about `920k rps` to about `1.09M rps`
+- the remaining Harrow-vs-`ntex` gap on dynamic `10kb` is now only about `6%`
+- static and dynamic Harrow runs have effectively the same syscall shape
+- profiled dynamic Harrow `/json/10kb` still spends about `25.6%` of collapsed
+  samples in `serde_json`
+- static Harrow `/json/10kb-static` spends `0%` in `serde_json`
+
+So the current large-JSON story is no longer "the HTTP transport is still too
+slow." It is "the transport is good enough; the remaining work is JSON
+serialization/materialization strategy."
 
 ## Measurement Stack
 

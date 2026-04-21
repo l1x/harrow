@@ -22,6 +22,9 @@
 //! io_uring backend, but it is not currently re-exported from the root
 //! `harrow` crate.
 //!
+//! Product scope and backend support policy live in
+//! [`docs/prds/harrow-1.0.md`](../docs/prds/harrow-1.0.md).
+//!
 //! ### Feature Flag Selection
 //!
 //! ```toml
@@ -32,10 +35,11 @@
 //! harrow = { version = "0.10", features = ["monoio"] }
 //! ```
 //!
-//! The current runtime direction is documented in
-//! [`docs/strategy-local-workers.md`](../docs/strategy-local-workers.md), and
-//! the shared HTTP/1 dispatcher shape is documented in
-//! [`docs/h1-dispatcher-design.md`](../docs/h1-dispatcher-design.md).
+//! The shared HTTP/1 dispatcher shape is documented in
+//! [`docs/h1-dispatcher-design.md`](../docs/h1-dispatcher-design.md). The
+//! earlier runtime rewrite strategy is preserved as a historical implementation
+//! note in
+//! [`docs/strategy-local-workers.md`](../docs/strategy-local-workers.md).
 
 pub use harrow_core::client::{Client, TestResponse};
 pub use harrow_core::handler;

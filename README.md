@@ -134,11 +134,12 @@ let app = App::new()
 ## Documentation
 
 - [Harrow 1.0 PRD](docs/prds/harrow-1.0.md) -- current product scope, support policy, and release criteria
-- [Design rationale](docs/prds/harrow-http-framework.md) -- why Harrow exists and what it optimises for
-- [Local-worker runtime strategy](docs/strategy-local-workers.md) -- the current nginx/ntex-style runtime direction
+- [Design rationale](docs/prds/harrow-http-framework.md) -- historical product/design rationale behind Harrow
+- [Local-worker runtime strategy](docs/strategy-local-workers.md) -- historical implementation strategy for the custom backend rewrite
 - [HTTP/1 dispatcher design](docs/h1-dispatcher-design.md) -- how the shared custom backend is structured
 - [Explicit extractors philosophy](docs/explicit-extractors.md) -- the design choice behind plain function signatures
-- [Performance notes](docs/performance.md) -- current benchmark workflow, methodology, and historical results
+- [Performance notes](docs/performance.md) -- current benchmark workflow, current 0.10 conclusions, and preserved historical notes
+- [Performance journal](docs/article.md) -- historical engineering log of the rewrite and benchmark investigation
 
 ## Workspace layout
 

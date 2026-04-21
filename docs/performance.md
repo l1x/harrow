@@ -1,17 +1,58 @@
 # Harrow Performance Notes
 
-**Date:** 2026-02-20
-**Historical baseline version:** 0.1.0-dev
-**Platform:** macOS (Darwin 24.6.0), Apple Silicon
-**Rust:** edition 2024, release profile (`opt-level = 3`, `lto = "thin"`, `debug = true`)
+**Last updated:** 2026-04-21  
+**Current line:** `0.10.x`  
 **Benchmark tools:** criterion 0.5; `spinr` + `harrow-bench` for remote perf runs
 
-This document is a historical baseline from Harrow's earlier Hyper/Tokio phase.
-Current runtime-direction decisions live in
-[`docs/strategy-local-workers.md`](./strategy-local-workers.md) and
-[`docs/article.md`](./article.md).
+> Product scope and backend support policy live in
+> [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md).
+> This file is the current benchmark workflow plus preserved historical notes.
 
 ---
+
+## Current 0.10 Snapshot
+
+The important current conclusions are:
+
+- Harrow Tokio is now near `ntex` on the hot `/text` path after the custom
+  HTTP/1 rewrite and the `Content-Length` framing fix.
+- The remaining large measured gap is concentrated on larger JSON responses,
+  not on the transport write path.
+- The recent JSON optimization pass added pooled thread-local scratch buffers,
+  zero-copy owned `Bytes`, and a pre-serialized benchmark control route.
+
+### Current benchmark takeaways
+
+Fresh remote measurements on `c8gn.12xlarge`, `spinr`, `128` connections:
+
+| Case | Harrow Tokio | ntex Tokio |
+|---|---:|---:|
+| `/json/1kb` | `2,091,574 rps`, `p99 0.14ms` | `2,272,021 rps`, `p99 0.13ms` |
+| `/json/10kb` | `1,093,032 rps`, `p99 0.30ms` | `1,164,649 rps`, `p99 0.29ms` |
+
+For Harrow, the benchmark control route:
+
+| Case | Harrow Tokio |
+|---|---:|
+| `/json/10kb-static` | `1,270,223 rps`, `p99 0.33ms` |
+
+### Current JSON conclusion
+
+The remaining `/json/10kb` gap is now mostly **per-request JSON
+serialization/materialization**, not HTTP transport.
+
+Evidence:
+
+- dynamic `10kb` improved from about `920k rps` to about `1.09M rps` after the
+  pooled-buffer/owned-`Bytes` change
+- static `10kb` reaches about `1.27M rps`
+- dynamic and static Harrow runs have effectively the same syscall shape
+- profiled dynamic Harrow `/json/10kb` still spends about `25.6%` of collapsed
+  samples in `serde_json`
+- static Harrow `/json/10kb-static` spends `0%` in `serde_json`
+
+So the current JSON work should be treated as **serialization optimization**,
+not another transport rewrite.
 
 ## Current Benchmark Workflow
 
@@ -38,6 +79,36 @@ mise run bench:verify
 mise run bench:baseline:all
 mise run bench:perf:all
 mise run bench:compare:harrow-vs-ntex
+```
+
+For the current large-JSON investigation, use focused runs rather than the full
+matrix:
+
+```bash
+# dynamic payload
+cargo run -p harrow-bench --release --bin harrow-remote-perf-test -- \
+  --mode remote \
+  --server-ssh <server-public-ip> \
+  --client-ssh <client-public-ip> \
+  --server-private <server-private-ip> \
+  --instance-type c8gn.12xlarge \
+  --framework harrow \
+  --backend tokio \
+  --allocator mimalloc \
+  --config harrow-bench/spinr/json-10kb-c128.toml
+
+# pre-serialized control payload
+cargo run -p harrow-bench --release --bin harrow-remote-perf-test -- \
+  --mode remote \
+  --server-ssh <server-public-ip> \
+  --client-ssh <client-public-ip> \
+  --server-private <server-private-ip> \
+  --instance-type c8gn.12xlarge \
+  --framework harrow \
+  --backend tokio \
+  --allocator mimalloc \
+  --compare single \
+  --config .tmp/json-10kb-static-c128.toml
 ```
 
 What each task does:
@@ -95,7 +166,14 @@ cargo run -p harrow-bench --release --bin harrow-remote-perf-test -- \
 
 ---
 
-## Historical Reproduction Notes
+## Historical Baseline Notes
+
+The rest of this file preserves older local and remote benchmark notes from the
+earlier Hyper/Tokio phase and the first benchmark cleanup passes. Those notes
+are still useful for provenance, but they are not the current product contract
+or the current performance diagnosis.
+
+### Historical Reproduction Notes
 
 ```bash
 cargo bench
