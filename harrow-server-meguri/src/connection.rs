@@ -116,6 +116,10 @@ pub(crate) struct Conn {
     pub accepted_at: Instant,
     /// When the current request started (reset on keep-alive).
     pub request_started_at: Instant,
+    /// Generation counter for lazy timeout-heap invalidation.
+    pub deadline_generation: u64,
+    /// Most recently tracked deadline for this connection.
+    pub tracked_deadline: Option<Instant>,
 }
 
 /// Result of processing bytes from a RECV completion.
@@ -179,6 +183,8 @@ impl Conn {
             timeout_error: None,
             accepted_at: now,
             request_started_at: now,
+            deadline_generation: 0,
+            tracked_deadline: None,
         }
     }
 

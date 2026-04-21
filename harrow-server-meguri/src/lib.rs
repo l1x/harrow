@@ -38,6 +38,10 @@ use harrow_codec_h1 as codec;
 pub(crate) mod connection;
 
 #[cfg(target_os = "linux")]
+use std::cmp::Reverse;
+#[cfg(target_os = "linux")]
+use std::collections::BinaryHeap;
+#[cfg(target_os = "linux")]
 use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
@@ -132,6 +136,14 @@ const WRITE_USER_DATA_FLAG: u64 = 1 << 60;
 /// Wake interval while a local dispatch task is still in flight.
 const DISPATCH_TICK_MILLIS: i64 = 10;
 
+#[cfg(target_os = "linux")]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct DeadlineEntry {
+    deadline: std::time::Instant,
+    conn_idx: usize,
+    generation: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Public API: run / start / serve
 // ---------------------------------------------------------------------------
@@ -199,24 +211,26 @@ where
         Ok(Ok(a)) => a,
         Ok(Err(e)) => {
             shutdown.store(true, Ordering::Release);
-            let mut handle = ServerHandle {
+            let _ = harrow_server::ThreadedServerHandle::new(
                 addr,
                 shutdown,
-                completion: completion_rx,
-                workers: vec![first_worker.handle],
-            };
-            let _ = handle.join_workers();
+                completion_rx,
+                vec![first_worker.handle],
+                wake_workers,
+            )
+            .shutdown();
             return Err(e);
         }
         Err(e) => {
             shutdown.store(true, Ordering::Release);
-            let mut handle = ServerHandle {
+            let _ = harrow_server::ThreadedServerHandle::new(
                 addr,
                 shutdown,
-                completion: completion_rx,
-                workers: vec![first_worker.handle],
-            };
-            let _ = handle.join_workers();
+                completion_rx,
+                vec![first_worker.handle],
+                wake_workers,
+            )
+            .shutdown();
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("worker startup timed out: {e}"),
@@ -241,25 +255,27 @@ where
             Ok(Err(e)) => {
                 shutdown.store(true, Ordering::Release);
                 workers.push(worker.handle);
-                let mut handle = ServerHandle {
-                    addr: bound_addr,
+                let _ = harrow_server::ThreadedServerHandle::new(
+                    bound_addr,
                     shutdown,
-                    completion: completion_rx,
+                    completion_rx,
                     workers,
-                };
-                let _ = handle.join_workers();
+                    wake_workers,
+                )
+                .shutdown();
                 return Err(e);
             }
             Err(e) => {
                 shutdown.store(true, Ordering::Release);
                 workers.push(worker.handle);
-                let mut handle = ServerHandle {
-                    addr: bound_addr,
+                let _ = harrow_server::ThreadedServerHandle::new(
+                    bound_addr,
                     shutdown,
-                    completion: completion_rx,
+                    completion_rx,
                     workers,
-                };
-                let _ = handle.join_workers();
+                    wake_workers,
+                )
+                .shutdown();
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!("worker startup timed out: {e}"),
@@ -273,10 +289,13 @@ where
     );
 
     Ok(ServerHandle {
-        addr: bound_addr,
-        shutdown,
-        completion: completion_rx,
-        workers,
+        inner: harrow_server::ThreadedServerHandle::new(
+            bound_addr,
+            shutdown,
+            completion_rx,
+            workers,
+            wake_workers,
+        ),
     })
 }
 
@@ -314,78 +333,24 @@ pub fn serve_with_config(app: App, addr: SocketAddr, config: ServerConfig) -> Re
 ///
 /// Dropping the handle signals shutdown and waits for all workers to exit.
 pub struct ServerHandle {
-    addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
-    completion: mpsc::Receiver<Result<(), String>>,
-    workers: Vec<thread::JoinHandle<Result<(), BoxError>>>,
+    inner: harrow_server::ThreadedServerHandle<BoxError, fn(SocketAddr, usize)>,
 }
 
 #[cfg(target_os = "linux")]
 impl ServerHandle {
     /// The socket address the server bound to.
     pub fn local_addr(&self) -> SocketAddr {
-        self.addr
+        self.inner.local_addr()
     }
 
     /// Signal shutdown and wait for all workers to exit.
-    pub fn shutdown(mut self) -> Result<(), BoxError> {
-        self.shutdown.store(true, Ordering::Release);
-        self.wake_workers();
-        self.join_workers()
+    pub fn shutdown(self) -> Result<(), BoxError> {
+        self.inner.shutdown()
     }
 
     /// Block until shutdown is triggered or a worker exits with an error.
-    pub fn wait(mut self) -> Result<(), BoxError> {
-        let _ = self.completion.recv();
-        self.shutdown.store(true, Ordering::Release);
-        self.wake_workers();
-        self.join_workers()
-    }
-
-    fn wake_workers(&self) {
-        wake_workers(self.addr, self.workers.len());
-    }
-
-    fn join_workers(&mut self) -> Result<(), BoxError> {
-        let mut first_error: Option<BoxError> = None;
-        let addr = self.addr;
-        let worker_count = self.workers.len();
-
-        for worker in self.workers.drain(..) {
-            match worker.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    if first_error.is_none() {
-                        self.shutdown.store(true, Ordering::Release);
-                        wake_workers(addr, worker_count);
-                        first_error = Some(err);
-                    }
-                }
-                Err(panic) => {
-                    if first_error.is_none() {
-                        self.shutdown.store(true, Ordering::Release);
-                        wake_workers(addr, worker_count);
-                        first_error = Some(join_panic_error(panic));
-                    }
-                }
-            }
-        }
-
-        match first_error {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for ServerHandle {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        self.wake_workers();
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
-        }
+    pub fn wait(self) -> Result<(), BoxError> {
+        self.inner.wait()
     }
 }
 
@@ -397,21 +362,9 @@ fn wake_workers(addr: SocketAddr, worker_count: usize) {
 }
 
 #[cfg(target_os = "linux")]
-fn join_panic_error(panic: Box<dyn std::any::Any + Send + 'static>) -> BoxError {
-    let message = if let Some(message) = panic.downcast_ref::<&str>() {
-        format!("worker thread panicked: {message}")
-    } else if let Some(message) = panic.downcast_ref::<String>() {
-        format!("worker thread panicked: {message}")
-    } else {
-        "worker thread panicked".to_string()
-    };
-    Box::new(std::io::Error::other(message))
-}
-
 // ---------------------------------------------------------------------------
 // Worker spawning
 // ---------------------------------------------------------------------------
-
 #[cfg(target_os = "linux")]
 struct WorkerThread {
     handle: thread::JoinHandle<Result<(), BoxError>>,
@@ -549,6 +502,7 @@ fn worker_loop(
     let mut dispatch_tick_armed = false;
     let mut timeout_armed = false;
     let mut timeout_deadline = None;
+    let mut deadline_heap = BinaryHeap::new();
 
     // Submit initial accept SQE.
     submit_accept(
@@ -571,8 +525,8 @@ fn worker_loop(
 
         schedule_next_timeout(
             &mut ring,
+            &mut deadline_heap,
             &conns,
-            config,
             &mut timeout_armed,
             &mut timeout_deadline,
             &mut timeout_ts,
@@ -592,7 +546,9 @@ fn worker_loop(
             let res = cqe.res;
 
             if user_data == ACCEPT_USER_DATA {
-                handle_accept(res, &mut ring, &mut conns, config);
+                if let Some(idx) = handle_accept(res, &mut ring, &mut conns, config) {
+                    refresh_timeout_deadline(&mut deadline_heap, &mut conns, idx, config);
+                }
                 // Re-arm accept only if not shutting down.
                 if !shutdown.load(Ordering::Acquire) {
                     submit_accept(
@@ -605,21 +561,24 @@ fn worker_loop(
             } else if user_data == TIMEOUT_USER_DATA {
                 timeout_armed = false;
                 timeout_deadline = None;
-                sweep_timed_out_connections(&mut ring, &mut conns, config);
+                sweep_timed_out_connections(&mut ring, &mut conns, config, &mut deadline_heap);
             } else if user_data == TIMEOUT_CANCEL_USER_DATA {
                 // Old timeout canceled so a new nearest-deadline timeout can replace it.
             } else if user_data == DISPATCH_TICK_USER_DATA {
                 dispatch_tick_armed = false;
             } else if let Some(conn_idx) = decode_recv_cancel_user_data(user_data) {
                 handle_recv_cancel_completion(&mut ring, &mut conns, conn_idx);
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             } else if let Some(conn_idx) = decode_recv_user_data(user_data) {
                 handle_recv_completion(
                     conn_idx, res, &mut ring, &mut conns, &shared, &local, config,
                 );
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             } else if let Some(conn_idx) = decode_write_user_data(user_data) {
                 handle_write_completion(
                     conn_idx, res, &mut ring, &mut conns, &shared, &local, config,
                 );
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             } else {
                 tracing::debug!("ignoring unexpected CQE user_data={user_data} res={res}");
             }
@@ -629,8 +588,22 @@ fn worker_loop(
         ring.cq_mut().flush_head();
 
         drive_dispatch_runtime(&tokio_rt, &local);
-        advance_dispatching_connections(&mut ring, &mut conns, &shared, &local, config);
-        advance_response_streaming_connections(&mut ring, &mut conns, &shared, &local, config);
+        advance_dispatching_connections(
+            &mut ring,
+            &mut conns,
+            &shared,
+            &local,
+            config,
+            &mut deadline_heap,
+        );
+        advance_response_streaming_connections(
+            &mut ring,
+            &mut conns,
+            &shared,
+            &local,
+            config,
+            &mut deadline_heap,
+        );
     }
 
     // Drain phase: wait for in-flight connections.
@@ -643,8 +616,8 @@ fn worker_loop(
 
         schedule_next_timeout(
             &mut ring,
+            &mut deadline_heap,
             &conns,
-            config,
             &mut timeout_armed,
             &mut timeout_deadline,
             &mut timeout_ts,
@@ -668,26 +641,43 @@ fn worker_loop(
             } else if user_data == TIMEOUT_USER_DATA {
                 timeout_armed = false;
                 timeout_deadline = None;
-                sweep_timed_out_connections(&mut ring, &mut conns, config);
+                sweep_timed_out_connections(&mut ring, &mut conns, config, &mut deadline_heap);
             } else if user_data == TIMEOUT_CANCEL_USER_DATA {
             } else if let Some(conn_idx) = decode_recv_cancel_user_data(user_data) {
                 handle_recv_cancel_completion(&mut ring, &mut conns, conn_idx);
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             } else if let Some(conn_idx) = decode_recv_user_data(user_data) {
                 handle_recv_completion(
                     conn_idx, res, &mut ring, &mut conns, &shared, &local, config,
                 );
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             } else if let Some(conn_idx) = decode_write_user_data(user_data) {
                 handle_write_completion(
                     conn_idx, res, &mut ring, &mut conns, &shared, &local, config,
                 );
+                refresh_timeout_deadline(&mut deadline_heap, &mut conns, conn_idx, config);
             }
             ring.cq_mut().advance();
         }
         ring.cq_mut().flush_head();
         reap_closed_drain_connections(&mut conns);
         drive_dispatch_runtime(&tokio_rt, &local);
-        advance_dispatching_connections(&mut ring, &mut conns, &shared, &local, config);
-        advance_response_streaming_connections(&mut ring, &mut conns, &shared, &local, config);
+        advance_dispatching_connections(
+            &mut ring,
+            &mut conns,
+            &shared,
+            &local,
+            config,
+            &mut deadline_heap,
+        );
+        advance_response_streaming_connections(
+            &mut ring,
+            &mut conns,
+            &shared,
+            &local,
+            config,
+            &mut deadline_heap,
+        );
     }
 
     if !conns.is_empty() {
@@ -722,21 +712,12 @@ fn reap_closed_drain_connections(conns: &mut slab::Slab<connection::Conn>) {
 
 #[cfg(target_os = "linux")]
 fn resolve_worker_count(workers: Option<usize>) -> Result<usize, BoxError> {
-    match workers {
-        Some(0) => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "ServerConfig::workers must be greater than 0",
-        ))),
-        Some(n) => Ok(n),
-        None => Ok(thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)),
-    }
+    Ok(harrow_server::resolve_worker_count(workers).map_err(Box::new)?)
 }
 
 #[cfg(target_os = "linux")]
 fn per_worker_config(config: ServerConfig, workers: usize) -> ServerConfig {
-    let per_worker_max = config.max_connections.div_ceil(workers.max(1));
+    let per_worker_max = harrow_server::per_worker_max_connections(config.max_connections, workers);
     ServerConfig {
         max_connections: per_worker_max.max(1),
         workers: Some(1),
@@ -865,11 +846,11 @@ fn handle_accept(
     ring: &mut meguri::Ring,
     conns: &mut slab::Slab<connection::Conn>,
     config: &ServerConfig,
-) {
+) -> Option<usize> {
     if res < 0 {
         let err = std::io::Error::from_raw_os_error(-res);
         tracing::error!("accept error: {err}");
-        return;
+        return None;
     }
 
     let fd = res;
@@ -879,7 +860,7 @@ fn handle_accept(
         unsafe {
             libc::close(fd);
         }
-        return;
+        return None;
     }
 
     // Set non-blocking.
@@ -902,6 +883,7 @@ fn handle_accept(
     let conn = connection::Conn::new(fd);
     let conn_idx = conns.insert(conn);
     submit_recv_or_close(ring, conn_idx, conns);
+    Some(conn_idx)
 }
 
 #[cfg(target_os = "linux")]
@@ -1095,13 +1077,13 @@ fn submit_dispatch_tick(ring: &mut meguri::Ring, ts: &libc::timespec) {
 #[cfg(target_os = "linux")]
 fn schedule_next_timeout(
     ring: &mut meguri::Ring,
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
     conns: &slab::Slab<connection::Conn>,
-    config: &ServerConfig,
     timeout_armed: &mut bool,
     timeout_deadline: &mut Option<std::time::Instant>,
     timeout_ts: &mut libc::timespec,
 ) {
-    let next_deadline = next_timeout_deadline(conns, config);
+    let next_deadline = next_timeout_deadline(deadline_heap, conns);
     if next_deadline == *timeout_deadline {
         return;
     }
@@ -1129,14 +1111,54 @@ fn schedule_next_timeout(
 
 #[cfg(target_os = "linux")]
 fn next_timeout_deadline(
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
     conns: &slab::Slab<connection::Conn>,
-    config: &ServerConfig,
 ) -> Option<std::time::Instant> {
-    conns
-        .iter()
-        .filter(|(_, conn)| !matches!(conn.state, connection::ConnState::Closed))
-        .filter_map(|(_, conn)| connection_timeout_deadline(conn, config))
-        .min()
+    while let Some(Reverse(entry)) = deadline_heap.peek().copied() {
+        let Some(conn) = conns.get(entry.conn_idx) else {
+            let _ = deadline_heap.pop();
+            continue;
+        };
+
+        if matches!(conn.state, connection::ConnState::Closed)
+            || conn.deadline_generation != entry.generation
+            || conn.tracked_deadline != Some(entry.deadline)
+        {
+            let _ = deadline_heap.pop();
+            continue;
+        }
+
+        return Some(entry.deadline);
+    }
+
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_timeout_deadline(
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
+    conns: &mut slab::Slab<connection::Conn>,
+    conn_idx: usize,
+    config: &ServerConfig,
+) {
+    let Some(conn) = conns.get_mut(conn_idx) else {
+        return;
+    };
+
+    conn.deadline_generation = conn.deadline_generation.wrapping_add(1);
+    conn.tracked_deadline = if matches!(conn.state, connection::ConnState::Closed) {
+        None
+    } else {
+        connection_timeout_deadline(conn, config)
+    };
+
+    if let Some(deadline) = conn.tracked_deadline {
+        deadline_heap.push(Reverse(DeadlineEntry {
+            deadline,
+            conn_idx,
+            generation: conn.deadline_generation,
+        }));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1178,6 +1200,7 @@ fn sweep_timed_out_connections(
     ring: &mut meguri::Ring,
     conns: &mut slab::Slab<connection::Conn>,
     config: &ServerConfig,
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
 ) {
     let expired: Vec<usize> = conns
         .iter()
@@ -1231,6 +1254,8 @@ fn sweep_timed_out_connections(
                 close_conn(idx, conns);
             }
         }
+
+        refresh_timeout_deadline(deadline_heap, conns, idx, config);
     }
 }
 
@@ -1480,6 +1505,7 @@ fn advance_dispatching_connections(
     shared: &Arc<SharedState>,
     local: &tokio::task::LocalSet,
     config: &ServerConfig,
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
 ) {
     let dispatching: Vec<usize> = conns
         .iter()
@@ -1490,6 +1516,7 @@ fn advance_dispatching_connections(
     for conn_idx in dispatching {
         if conns.contains(conn_idx) {
             advance_dispatching_connection(ring, conns, conn_idx, shared, local, config);
+            refresh_timeout_deadline(deadline_heap, conns, conn_idx, config);
         }
     }
 }
@@ -1501,6 +1528,7 @@ fn advance_response_streaming_connections(
     shared: &Arc<SharedState>,
     local: &tokio::task::LocalSet,
     config: &ServerConfig,
+    deadline_heap: &mut BinaryHeap<Reverse<DeadlineEntry>>,
 ) {
     let writing: Vec<usize> = conns
         .iter()
@@ -1515,6 +1543,7 @@ fn advance_response_streaming_connections(
     for conn_idx in writing {
         if conns.contains(conn_idx) {
             advance_response_stream(ring, conns, conn_idx, shared, local, config);
+            refresh_timeout_deadline(deadline_heap, conns, conn_idx, config);
         }
     }
 }
@@ -1583,5 +1612,57 @@ fn advance_dispatching_connection(
             conns[conn_idx].set_error_response(error);
             submit_write_or_close(ring, conn_idx, conns);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn test_config() -> ServerConfig {
+        ServerConfig {
+            max_connections: 16,
+            ring_entries: 64,
+            header_read_timeout: Some(Duration::from_secs(5)),
+            body_read_timeout: Some(Duration::from_secs(30)),
+            connection_timeout: Some(Duration::from_secs(60)),
+            drain_timeout: Duration::from_secs(5),
+            max_body_size: 1024 * 1024,
+            workers: Some(1),
+        }
+    }
+
+    #[test]
+    fn deadline_heap_skips_stale_entries_after_refresh() {
+        let config = test_config();
+        let mut heap = BinaryHeap::new();
+        let mut conns = slab::Slab::new();
+        let idx = conns.insert(connection::Conn::new(0));
+
+        refresh_timeout_deadline(&mut heap, &mut conns, idx, &config);
+        let first = next_timeout_deadline(&mut heap, &conns).unwrap();
+
+        conns[idx].state = connection::ConnState::Writing;
+        refresh_timeout_deadline(&mut heap, &mut conns, idx, &config);
+        let next = next_timeout_deadline(&mut heap, &conns).unwrap();
+
+        assert!(next >= first);
+        assert_eq!(conns[idx].tracked_deadline, Some(next));
+    }
+
+    #[test]
+    fn deadline_heap_drops_closed_connections() {
+        let config = test_config();
+        let mut heap = BinaryHeap::new();
+        let mut conns = slab::Slab::new();
+        let idx = conns.insert(connection::Conn::new(0));
+
+        refresh_timeout_deadline(&mut heap, &mut conns, idx, &config);
+        assert!(next_timeout_deadline(&mut heap, &conns).is_some());
+
+        conns[idx].state = connection::ConnState::Closed;
+        refresh_timeout_deadline(&mut heap, &mut conns, idx, &config);
+
+        assert!(next_timeout_deadline(&mut heap, &conns).is_none());
     }
 }

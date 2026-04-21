@@ -161,69 +161,26 @@ impl Default for ServerConfig {
 ///
 /// Dropping the handle signals shutdown and waits for all workers to exit.
 pub struct ServerHandle {
-    addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
-    completion: mpsc::Receiver<Result<(), String>>,
-    workers: Vec<thread::JoinHandle<Result<(), BoxError>>>,
+    inner: harrow_server::ThreadedServerHandle<BoxError>,
 }
 
 impl ServerHandle {
     /// The socket address the server bound to.
     pub fn local_addr(&self) -> SocketAddr {
-        self.addr
+        self.inner.local_addr()
     }
 
     /// Signal shutdown and wait for all workers to exit.
-    pub fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
-        self.shutdown.store(true, Ordering::Release);
-        self.join_workers().map_err(into_public_error)
+    pub fn shutdown(self) -> Result<(), Box<dyn Error>> {
+        self.inner.shutdown().map_err(into_public_error)
     }
 
     /// Wait for the workers to exit.
     ///
     /// This blocks until shutdown is triggered or a worker exits with an
     /// unexpected error.
-    pub fn wait(mut self) -> Result<(), Box<dyn Error>> {
-        let _ = self.completion.recv();
-        self.shutdown.store(true, Ordering::Release);
-        self.join_workers().map_err(into_public_error)
-    }
-
-    fn join_workers(&mut self) -> Result<(), BoxError> {
-        let mut first_error: Option<BoxError> = None;
-
-        for worker in self.workers.drain(..) {
-            match worker.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    if first_error.is_none() {
-                        self.shutdown.store(true, Ordering::Release);
-                        first_error = Some(err);
-                    }
-                }
-                Err(panic) => {
-                    if first_error.is_none() {
-                        self.shutdown.store(true, Ordering::Release);
-                        first_error = Some(join_panic_error(panic));
-                    }
-                }
-            }
-        }
-
-        if let Some(err) = first_error {
-            Err(err)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for ServerHandle {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
-        }
+    pub fn wait(self) -> Result<(), Box<dyn Error>> {
+        self.inner.wait().map_err(into_public_error)
     }
 }
 
@@ -272,7 +229,7 @@ where
         return Err(Box::new(err));
     }
 
-    let worker_count = resolved_worker_count(config.workers)?;
+    let worker_count = harrow_server::resolve_worker_count(config.workers).map_err(Box::new)?;
     let worker_config = per_worker_config(config, worker_count);
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(worker_count);
@@ -290,24 +247,26 @@ where
         Ok(Ok(bound_addr)) => bound_addr,
         Ok(Err(err)) => {
             shutdown.store(true, Ordering::Release);
-            let mut handle = ServerHandle {
+            let _ = harrow_server::ThreadedServerHandle::new(
                 addr,
                 shutdown,
-                completion: completion_rx,
-                workers: vec![first_worker.handle],
-            };
-            let _ = handle.join_workers();
+                completion_rx,
+                vec![first_worker.handle],
+                harrow_server::noop_wake_workers,
+            )
+            .shutdown();
             return Err(into_public_error(err));
         }
         Err(err) => {
             shutdown.store(true, Ordering::Release);
-            let mut handle = ServerHandle {
+            let _ = harrow_server::ThreadedServerHandle::new(
                 addr,
                 shutdown,
-                completion: completion_rx,
-                workers: vec![first_worker.handle],
-            };
-            let _ = handle.join_workers();
+                completion_rx,
+                vec![first_worker.handle],
+                harrow_server::noop_wake_workers,
+            )
+            .shutdown();
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("worker startup failed before reporting a bound address: {err}"),
@@ -330,25 +289,27 @@ where
             Ok(Err(err)) => {
                 shutdown.store(true, Ordering::Release);
                 workers.push(worker.handle);
-                let mut handle = ServerHandle {
-                    addr: bound_addr,
+                let _ = harrow_server::ThreadedServerHandle::new(
+                    bound_addr,
                     shutdown,
-                    completion: completion_rx,
+                    completion_rx,
                     workers,
-                };
-                let _ = handle.join_workers();
+                    harrow_server::noop_wake_workers,
+                )
+                .shutdown();
                 return Err(into_public_error(err));
             }
             Err(err) => {
                 shutdown.store(true, Ordering::Release);
                 workers.push(worker.handle);
-                let mut handle = ServerHandle {
-                    addr: bound_addr,
+                let _ = harrow_server::ThreadedServerHandle::new(
+                    bound_addr,
                     shutdown,
-                    completion: completion_rx,
+                    completion_rx,
                     workers,
-                };
-                let _ = handle.join_workers();
+                    harrow_server::noop_wake_workers,
+                )
+                .shutdown();
                 return Err(Box::new(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("worker startup timed out: {err}"),
@@ -360,10 +321,13 @@ where
     o11y::record_server_start(bound_addr, &config);
 
     Ok(ServerHandle {
-        addr: bound_addr,
-        shutdown,
-        completion: completion_rx,
-        workers,
+        inner: harrow_server::ThreadedServerHandle::new(
+            bound_addr,
+            shutdown,
+            completion_rx,
+            workers,
+            harrow_server::noop_wake_workers,
+        ),
     })
 }
 
@@ -532,21 +496,8 @@ fn listener_options() -> ListenerOpts {
     ListenerOpts::new().reuse_port(true).reuse_addr(true)
 }
 
-fn resolved_worker_count(workers: Option<usize>) -> Result<usize, Box<dyn Error>> {
-    match workers {
-        Some(0) => Err(Box::new(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "ServerConfig::workers must be greater than 0",
-        ))),
-        Some(workers) => Ok(workers),
-        None => Ok(thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1)),
-    }
-}
-
 fn per_worker_config(config: ServerConfig, workers: usize) -> ServerConfig {
-    let per_worker_max = config.max_connections.div_ceil(workers.max(1));
+    let per_worker_max = harrow_server::per_worker_max_connections(config.max_connections, workers);
     ServerConfig {
         max_connections: per_worker_max.max(1),
         workers: Some(1),
@@ -556,18 +507,6 @@ fn per_worker_config(config: ServerConfig, workers: usize) -> ServerConfig {
 
 fn into_public_error(err: BoxError) -> Box<dyn Error> {
     err
-}
-
-fn join_panic_error(panic: Box<dyn std::any::Any + Send + 'static>) -> BoxError {
-    let message = if let Some(message) = panic.downcast_ref::<&str>() {
-        format!("worker thread panicked: {message}")
-    } else if let Some(message) = panic.downcast_ref::<String>() {
-        format!("worker thread panicked: {message}")
-    } else {
-        "worker thread panicked".to_string()
-    };
-
-    Box::new(io::Error::other(message))
 }
 
 struct WorkerThread {

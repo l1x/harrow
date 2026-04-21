@@ -1,9 +1,11 @@
 ---- MODULE ConnectionLifecycle ----
 (*
- * TLA+ specification for the harrow HTTP connection state machine.
+ * TLA+ specification for Harrow's shared HTTP/1 connection lifecycle.
  *
- * Models N connections managed by a single-threaded worker with a
- * slab allocator. Verifies safety and liveness properties.
+ * This is intentionally narrower than the runtime-specific backends. It models
+ * the protocol lifecycle boundary shared across Tokio / Monoio / Meguri:
+ * slab-slot ownership, pending I/O, body-vs-dispatch-vs-write transitions,
+ * early response before request EOF, timeout closure, and shutdown drain.
  *
  * Run: tla specs/tla/ConnectionLifecycle.tla -c MaxConns=3 --check-liveness
  *)
@@ -100,6 +102,14 @@ WriteMore(i) ==
     /\ pending_io' = [pending_io EXCEPT ![i] = "Write"]
     /\ UNCHANGED <<conns, shutdown, free_slots>>
 
+(* Handler finishes early before request EOF: switch from body pumping to write. *)
+EarlyResponse(i) ==
+    /\ conns[i] \in {"Body", "Dispatching"}
+    /\ pending_io[i] \in {"Recv", "None"}
+    /\ conns' = [conns EXCEPT ![i] = "Writing"]
+    /\ pending_io' = [pending_io EXCEPT ![i] = "Write"]
+    /\ UNCHANGED <<shutdown, free_slots>>
+
 (* Write completes: response done, keep-alive -> back to Headers. *)
 WriteKeepAlive(i) ==
     /\ conns[i] = "Writing"
@@ -117,8 +127,8 @@ WriteClose(i) ==
     /\ free_slots' = free_slots \cup {i}
     /\ UNCHANGED shutdown
 
-(* Parse error during headers: write error response then close. *)
-ParseError(i) ==
+(* Header parse/body-limit error: write error response then close. *)
+WriteErrorResponse(i) ==
     /\ conns[i] = "Headers"
     /\ pending_io[i] = "Recv"
     /\ conns' = [conns EXCEPT ![i] = "Writing"]
@@ -134,16 +144,16 @@ IoError(i) ==
     /\ free_slots' = free_slots \cup {i}
     /\ UNCHANGED shutdown
 
-(* Timeout sweep: close connection that has no pending I/O. *)
+(* Timeout handling: no CQE in flight, so close immediately. *)
 TimeoutNoPending(i) ==
-    /\ conns[i] \in {"Headers", "Body"}
+    /\ conns[i] \in {"Headers", "Body", "Dispatching"}
     /\ pending_io[i] = "None"
     /\ conns' = [conns EXCEPT ![i] = "Free"]
     /\ pending_io' = [pending_io EXCEPT ![i] = "None"]
     /\ free_slots' = free_slots \cup {i}
     /\ UNCHANGED shutdown
 
-(* Timeout sweep: close fd but keep slab entry for pending CQE. *)
+(* Timeout handling: keep slab entry alive until the pending CQE arrives. *)
 TimeoutWithPending(i) ==
     /\ conns[i] \in {"Headers", "Body"}
     /\ pending_io[i] \in {"Recv", "Write"}
@@ -185,11 +195,12 @@ Next ==
         \/ RecvNeedMore(i)
         \/ RecvBodyDone(i)
         \/ RecvBodyMore(i)
+        \/ EarlyResponse(i)
         \/ DispatchDone(i)
         \/ WriteMore(i)
         \/ WriteKeepAlive(i)
         \/ WriteClose(i)
-        \/ ParseError(i)
+        \/ WriteErrorResponse(i)
         \/ IoError(i)
         \/ TimeoutNoPending(i)
         \/ TimeoutWithPending(i)

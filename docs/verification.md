@@ -2,7 +2,7 @@
 
 Harrow is a stateless, request-response HTTP framework. It has no replicas, no
 consensus protocol, no on-disk durability, and no distributed state machine.
-This means the techniques that shine in distributed databases (DST with
+This means the techniques that shine in distributed databases (broad DST with
 shadow-state oracles, broad TLA+ specifications, Stateright model checking,
 Maelstrom linearizability tests) are largely inapplicable here. Applying them
 too broadly would create maintenance burden without catching real bugs.
@@ -15,14 +15,15 @@ What harrow *does* have:
 - Compression round-trip logic.
 - Query-string parsing with percent-decoding.
 - Body-size enforcement at two layers (Content-Length pre-check and frame accumulation).
-- A finite connection/control state machine in the HTTP/1 backends.
+- A finite shared connection/control state machine in the HTTP/1 backends.
 
 These are the surfaces where bugs hide. The right tools are **property-based
 testing** (proptest) for algebraic invariants, **fuzzing** (cargo-fuzz) for
 parsing robustness, and **Kani** for bounded verification of small, pure
-functions. A *small* formal model also makes sense where there is a genuine
-finite state machine to explore (today: backend connection/control lifecycle,
-not the framework as a whole). Everything else is unit tests.
+functions. A *small* deterministic lifecycle harness and a *small* formal model
+also make sense where there is a genuine finite state machine to explore
+(today: shared/backend-agnostic HTTP/1 connection lifecycle, not the framework
+as a whole). Everything else is unit tests.
 
 ---
 
@@ -33,8 +34,8 @@ not the framework as a whole). Everything else is unit tests.
 | **proptest** | Yes | Path matching, routing, GCRA arithmetic, compression round-trip, middleware ordering |
 | **cargo-fuzz** | Yes | Query-string parsing, path matching, Accept-Encoding parsing, HTTP/1 codec decoding |
 | **Kani** | Maybe | GCRA single-step correctness, `ns_to_secs_ceil`, path segment classification |
-| **DST** | No | No stateful command sequences, no shadow oracle needed |
-| **TLA+ / Quint** | Narrowly | HTTP/1 connection/control lifecycle only (today: TLA+ only) |
+| **DST** | Narrowly | Shared HTTP/1 lifecycle harness with replayable seeded scripts |
+| **TLA+ / Quint** | Narrowly | Shared HTTP/1 connection/control lifecycle only (today: TLA+ only) |
 | **Stateright** | No | No state-space explosion to explore |
 | **Maelstrom** | No | Not a distributed system |
 
@@ -169,17 +170,24 @@ to verify beyond the existing round-trip tests.
 
 ---
 
-### harrow-server-tokio
+### harrow-server / shared HTTP/1 lifecycle
 
-Connection handling and graceful shutdown are Tokio-level concerns. Property
-testing the shutdown protocol would require simulating Tokio's runtime, which
-is impractical. The integration tests in `harrow-server-tokio/tests/integration.rs`
-cover the key paths. The one exception is the finite connection/control state
-machine itself: slab-slot ownership, pending I/O, keep-alive reuse, timeout
-closure, and shutdown/drain transitions are small enough to justify the focused
-model in `specs/tla/ConnectionLifecycle.tla`. We are keeping that single TLA+
-spec for now rather than maintaining an equivalent Quint mirror with no extra
-state space or proof coverage.
+The runtime-specific read/write loops still belong in the backend crates, but
+the lifecycle invariants around:
+
+- request head/body/dispatch/write sequencing
+- early response before request EOF
+- pipelined keep-alive reuse
+- timeout closure vs pending CQEs
+- shutdown/drain terminal behavior
+
+are now covered by a shared deterministic lifecycle harness in
+`harrow-server::h1_lifecycle` plus the focused TLA+ model in
+`specs/tla/ConnectionLifecycle.tla`.
+
+That remains intentionally narrow. We are not trying to simulate Tokio,
+Monoio, or Meguri end-to-end. We are modeling the shared protocol lifecycle
+boundary that all of those backends rely on.
 
 ---
 

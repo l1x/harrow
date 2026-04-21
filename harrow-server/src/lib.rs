@@ -5,10 +5,13 @@
 //! shutdown coordination, and configuration.
 
 pub mod h1;
+pub mod h1_lifecycle;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 /// Server configuration shared across all backends.
@@ -161,6 +164,143 @@ pub fn join_workers(handles: Vec<std::thread::JoinHandle<()>>) -> Result<(), Str
     }
 }
 
+/// Resolve a configured worker count.
+///
+/// `None` defaults to the available parallelism. `Some(0)` is rejected.
+pub fn resolve_worker_count(workers: Option<usize>) -> std::io::Result<usize> {
+    match workers {
+        Some(0) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ServerConfig::workers must be greater than 0",
+        )),
+        Some(workers) => Ok(workers),
+        None => Ok(thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)),
+    }
+}
+
+/// Split a connection limit across workers, rounding up.
+pub fn per_worker_max_connections(max_connections: usize, workers: usize) -> usize {
+    max_connections.div_ceil(workers.max(1)).max(1)
+}
+
+/// No-op worker wake helper for runtimes that do not need an external wakeup.
+pub fn noop_wake_workers(_addr: SocketAddr, _worker_count: usize) {}
+
+fn join_panic_error(panic: Box<dyn std::any::Any + Send + 'static>) -> std::io::Error {
+    let message = if let Some(message) = panic.downcast_ref::<&str>() {
+        format!("worker thread panicked: {message}")
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        format!("worker thread panicked: {message}")
+    } else {
+        "worker thread panicked".to_string()
+    };
+
+    std::io::Error::other(message)
+}
+
+/// Shared handle for backends that run one blocking worker thread per core.
+pub struct ThreadedServerHandle<E, W = fn(SocketAddr, usize)>
+where
+    E: From<std::io::Error>,
+    W: Fn(SocketAddr, usize) + Copy,
+{
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    completion: mpsc::Receiver<Result<(), String>>,
+    workers: Vec<thread::JoinHandle<Result<(), E>>>,
+    wake_workers: W,
+}
+
+impl<E, W> ThreadedServerHandle<E, W>
+where
+    E: From<std::io::Error>,
+    W: Fn(SocketAddr, usize) + Copy,
+{
+    pub fn new(
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        completion: mpsc::Receiver<Result<(), String>>,
+        workers: Vec<thread::JoinHandle<Result<(), E>>>,
+        wake_workers: W,
+    ) -> Self {
+        Self {
+            addr,
+            shutdown,
+            completion,
+            workers,
+            wake_workers,
+        }
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn shutdown(mut self) -> Result<(), E> {
+        self.signal_shutdown();
+        self.join_workers()
+    }
+
+    pub fn wait(mut self) -> Result<(), E> {
+        let _ = self.completion.recv();
+        self.signal_shutdown();
+        self.join_workers()
+    }
+
+    fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        (self.wake_workers)(self.addr, self.workers.len());
+    }
+
+    fn join_workers(&mut self) -> Result<(), E> {
+        let mut first_error: Option<E> = None;
+        let addr = self.addr;
+        let worker_count = self.workers.len();
+        let shutdown = Arc::clone(&self.shutdown);
+        let wake_workers = self.wake_workers;
+
+        for worker in self.workers.drain(..) {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if first_error.is_none() {
+                        shutdown.store(true, Ordering::Release);
+                        wake_workers(addr, worker_count);
+                        first_error = Some(err);
+                    }
+                }
+                Err(panic) => {
+                    if first_error.is_none() {
+                        shutdown.store(true, Ordering::Release);
+                        wake_workers(addr, worker_count);
+                        first_error = Some(E::from(join_panic_error(panic)));
+                    }
+                }
+            }
+        }
+
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<E, W> Drop for ThreadedServerHandle<E, W>
+where
+    E: From<std::io::Error>,
+    W: Fn(SocketAddr, usize) + Copy,
+{
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn per_worker_max_connections() {
+    fn config_per_worker_max_connections() {
         let mut config = ServerConfig::default();
         config.workers = Some(4);
         assert_eq!(config.per_worker_max_connections(), 2048);
@@ -214,5 +354,15 @@ mod tests {
         let listener = reuseport_listener("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
         assert_ne!(addr.port(), 0);
+    }
+
+    #[test]
+    fn resolve_worker_count_rejects_zero() {
+        assert!(resolve_worker_count(Some(0)).is_err());
+    }
+
+    #[test]
+    fn standalone_per_worker_limit_rounds_up() {
+        assert_eq!(per_worker_max_connections(10, 3), 4);
     }
 }
