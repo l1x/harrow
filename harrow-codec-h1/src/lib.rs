@@ -1309,5 +1309,75 @@ mod proptests {
             prop_assert_eq!(parsed.method, Method::POST);
             prop_assert_eq!(parsed.content_length, Some(body.len() as u64));
         }
+
+        #[test]
+        fn request_body_roundtrip_with_content_length(
+            path in "/[a-z0-9/_-]{1,24}",
+            body in proptest::collection::vec(any::<u8>(), 0..2048),
+            trailing in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let req = format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let mut full = req.into_bytes();
+            full.extend_from_slice(&body);
+            full.extend_from_slice(&trailing);
+
+            let parsed = try_parse_request(&full).unwrap();
+            let mut decoder = PayloadDecoder::from_parsed(&parsed).unwrap();
+            let mut buf = BytesMut::from(&full[parsed.header_len..]);
+            let mut decoded = Vec::new();
+
+            loop {
+                match decoder.decode(&mut buf, None).unwrap() {
+                    Some(PayloadItem::Chunk(chunk)) => decoded.extend_from_slice(&chunk),
+                    Some(PayloadItem::Eof) => break,
+                    None => prop_assert!(false, "unexpected incomplete request body"),
+                }
+            }
+
+            prop_assert_eq!(decoded.as_slice(), body.as_slice());
+            prop_assert_eq!(buf.as_ref(), trailing.as_slice());
+        }
+
+        #[test]
+        fn request_body_roundtrip_with_chunked_framing(
+            path in "/[a-z0-9/_-]{1,24}",
+            chunks in proptest::collection::vec(
+                proptest::collection::vec(any::<u8>(), 1..256),
+                1..6
+            ),
+        ) {
+            let mut full = format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .into_bytes();
+            let mut expected = Vec::new();
+
+            for chunk in &chunks {
+                encode_chunk_into(chunk, &mut full);
+                expected.extend_from_slice(chunk);
+            }
+            full.extend_from_slice(CHUNK_TERMINATOR);
+
+            let parsed = try_parse_request(&full).unwrap();
+            prop_assert!(parsed.chunked);
+
+            let mut decoder = PayloadDecoder::from_parsed(&parsed).unwrap();
+            let mut buf = BytesMut::from(&full[parsed.header_len..]);
+            let mut decoded = Vec::new();
+
+            loop {
+                match decoder.decode(&mut buf, None).unwrap() {
+                    Some(PayloadItem::Chunk(chunk)) => decoded.extend_from_slice(&chunk),
+                    Some(PayloadItem::Eof) => break,
+                    None => prop_assert!(false, "unexpected incomplete chunked body"),
+                }
+            }
+
+            prop_assert_eq!(decoded.as_slice(), expected.as_slice());
+            prop_assert!(buf.is_empty());
+        }
     }
 }

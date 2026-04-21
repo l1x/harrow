@@ -71,16 +71,20 @@ impl Response {
     #[cfg(feature = "json")]
     pub fn json(value: &impl serde::Serialize) -> Self {
         match harrow_serde::json::serialize(value) {
-            Ok(bytes) => {
-                let mut resp = Self::new(StatusCode::OK, bytes);
-                resp.set_header_static(
-                    http::header::CONTENT_TYPE,
-                    http::header::HeaderValue::from_static(harrow_serde::json::CONTENT_TYPE),
-                );
-                resp
-            }
+            Ok(bytes) => Self::json_bytes(bytes),
             Err(_) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "serialization error"),
         }
+    }
+
+    /// 200 OK with a pre-serialized JSON body.
+    #[cfg(feature = "json")]
+    pub fn json_bytes(body: impl Into<Bytes>) -> Self {
+        let mut resp = Self::new(StatusCode::OK, body);
+        resp.set_header_static(
+            http::header::CONTENT_TYPE,
+            http::header::HeaderValue::from_static(harrow_serde::json::CONTENT_TYPE),
+        );
+        resp
     }
 
     /// 200 OK with a MessagePack body.
@@ -323,6 +327,27 @@ mod tests {
         let body = inner.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed, serde_json::json!({"key": "val"}));
+    }
+
+    #[cfg(feature = "json")]
+    #[tokio::test]
+    async fn json_bytes_sets_content_type_and_length() {
+        let resp = Response::json_bytes(Bytes::from_static(br#"{"key":"val"}"#));
+        assert_eq!(resp.status_code(), StatusCode::OK);
+        let inner = resp.into_inner();
+        assert_eq!(
+            inner.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            inner
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("13")
+        );
+        let body = inner.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from_static(br#"{"key":"val"}"#));
     }
 
     #[cfg(feature = "msgpack")]

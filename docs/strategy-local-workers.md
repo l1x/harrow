@@ -4,6 +4,9 @@
 **Date:** 2026-04-15
 **Scope:** `feat/custom-http-backend`
 
+> Historical implementation strategy note. For the current product scope and
+> backend support policy, see [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md).
+
 ---
 
 ## 1. Decision

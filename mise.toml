@@ -75,6 +75,10 @@ run = "cargo fuzz run --manifest-path harrow-codec-h1/fuzz/Cargo.toml fuzz_respo
 description = "Run HTTP/1 payload-decoder fuzzing"
 run = "cargo fuzz run --manifest-path harrow-codec-h1/fuzz/Cargo.toml fuzz_payload_decoder"
 
+[tasks."fuzz:codec:roundtrip"]
+description = "Run framed-request/body roundtrip fuzzing"
+run = "cargo fuzz run --manifest-path harrow-codec-h1/fuzz/Cargo.toml fuzz_roundtrip"
+
 [tasks.ci]
 description = "Run full CI pipeline (fmt, clippy, test)"
 depends = ["verify"]

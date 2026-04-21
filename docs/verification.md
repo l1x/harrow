@@ -194,6 +194,11 @@ state space or proof coverage.
 - `mise run fuzz:core:path`
 - `mise run fuzz:core:query`
 - `mise run fuzz:middleware:accept-encoding`
+- `mise run fuzz:codec:parse-request`
+- `mise run fuzz:codec:chunked-decode`
+- `mise run fuzz:codec:response-head`
+- `mise run fuzz:codec:payload-decoder`
+- `mise run fuzz:codec:roundtrip`
 
 ---
 

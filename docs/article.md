@@ -3,6 +3,9 @@
 **Status:** living document  
 **Last updated:** 2026-04-19
 
+> Historical engineering log. For the current product scope and support
+> policy, see [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md).
+
 This is not a launch post and not a benchmark victory lap. It is a dated
 engineering log for Harrow's performance work: what we measured, what moved the
 numbers, what did not, and which optimizations we deliberately refused to do.

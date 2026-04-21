@@ -83,6 +83,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
 use harrow::{App, Next, Request, Response, SessionStore};
 use serde::{Deserialize, Serialize};
 
@@ -269,6 +270,11 @@ pub static USERS_10: LazyLock<Vec<User>> = LazyLock::new(|| make_users(10));
 
 /// 100 user objects — ~10KB when JSON-encoded.
 pub static USERS_100: LazyLock<Vec<User>> = LazyLock::new(|| make_users(100));
+pub static JSON_10KB_STATIC: LazyLock<Bytes> = LazyLock::new(|| {
+    Bytes::from(
+        serde_json::to_vec(&*USERS_100).expect("failed to serialize static 10kb benchmark payload"),
+    )
+});
 
 // --- Harrow handlers for serde benchmarks ---
 
@@ -282,6 +288,10 @@ pub async fn json_1kb_typed_handler(_req: Request) -> Response {
 
 pub async fn json_10kb_typed_handler(_req: Request) -> Response {
     Response::json(&*USERS_100)
+}
+
+pub async fn json_10kb_static_handler(_req: Request) -> Response {
+    Response::json_bytes(JSON_10KB_STATIC.clone())
 }
 
 pub async fn msgpack_small_handler(_req: Request) -> Response {

@@ -12,9 +12,11 @@ runtime architecture, and opt-in observability.
 - **Fast** -- custom HTTP/1 transport with shared codec/dispatcher pieces, `matchit` routing, and no Tower or `BoxCloneService`.
 - **Pluggable server backends** -- choose between Tokio/custom HTTP/1 (cross-platform) or Monoio/io_uring (Linux high-performance).
 
-## Server Backends (Required)
+## Server Backends
 
-Harrow requires you to explicitly select an HTTP server backend. There is no default — you must pick exactly one:
+To run a server, explicitly select an HTTP backend. There is no default — the
+public `harrow` crate exposes the application/core APIs without a backend, and
+server entrypoints appear when you enable one:
 
 | Backend               | Feature  | Best For                                | Platform              |
 | --------------------- | -------- | --------------------------------------- | --------------------- |
@@ -64,6 +66,10 @@ use harrow::runtime::monoio::run;
 ```
 
 See [`examples/monoio_hello.rs`](harrow/examples/monoio_hello.rs) for a complete Monoio example.
+
+For advanced Monoio lifecycle control (`start`, `ServerHandle`, async `serve*`
+entrypoints), depend on `harrow-server-monoio` directly. The root `harrow`
+crate intentionally exposes only the smaller `run` / `run_with_config` surface.
 
 ## Quickstart
 
@@ -127,6 +133,7 @@ let app = App::new()
 
 ## Documentation
 
+- [Harrow 1.0 PRD](docs/prds/harrow-1.0.md) -- current product scope, support policy, and release criteria
 - [Design rationale](docs/prds/harrow-http-framework.md) -- why Harrow exists and what it optimises for
 - [Local-worker runtime strategy](docs/strategy-local-workers.md) -- the current nginx/ntex-style runtime direction
 - [HTTP/1 dispatcher design](docs/h1-dispatcher-design.md) -- how the shared custom backend is structured

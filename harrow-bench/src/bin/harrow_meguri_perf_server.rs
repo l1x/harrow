@@ -17,8 +17,9 @@ mod server {
 
     use harrow::{App, Request, Response};
     use harrow_bench::{
-        json_1kb_typed_handler, json_10kb_typed_handler, json_small_handler, msgpack_1kb_handler,
-        msgpack_10kb_handler, msgpack_small_handler, text_handler,
+        json_1kb_typed_handler, json_10kb_static_handler, json_10kb_typed_handler,
+        json_small_handler, msgpack_1kb_handler, msgpack_10kb_handler, msgpack_small_handler,
+        text_handler,
     };
 
     fn parse_args() -> (String, u16) {
@@ -57,6 +58,7 @@ mod server {
                 .get("/json/small", json_small_handler)
                 .get("/json/1kb", json_1kb_typed_handler)
                 .get("/json/10kb", json_10kb_typed_handler)
+                .get("/json/10kb-static", json_10kb_static_handler)
                 .get("/msgpack/small", msgpack_small_handler)
                 .get("/msgpack/1kb", msgpack_1kb_handler)
                 .get("/msgpack/10kb", msgpack_10kb_handler)

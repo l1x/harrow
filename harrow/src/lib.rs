@@ -3,11 +3,11 @@
 //! A thin, macro-free HTTP framework with custom HTTP/1 backends, local-worker
 //! runtime architecture, and opt-in observability.
 //!
-//! ## Server Backends (Required)
+//! ## Server Backends
 //!
-//! Harrow requires you to explicitly select a server backend via Cargo
-//! features. There is no default — in the public `harrow` crate you must pick
-//! exactly one of:
+//! To run a server, explicitly select a backend via Cargo features. There is
+//! no default — the public `harrow` crate exposes the application/core APIs
+//! without a backend, and server entrypoints appear when you enable one of:
 //!
 //! - **`tokio`**: Custom HTTP/1 transport on Tokio with per-worker
 //!   `current_thread` runtimes and `LocalSet`.
@@ -54,18 +54,7 @@ pub use harrow_server_tokio::{
 };
 
 #[cfg(all(feature = "monoio", not(feature = "tokio")))]
-pub use harrow_server_monoio::{
-    ServerConfig, ServerHandle, run, run_with_config, serve, serve_with_config,
-    serve_with_shutdown, start, start_with_config,
-};
-
-#[cfg(not(any(feature = "tokio", feature = "monoio")))]
-compile_error!(
-    "harrow requires a server backend feature. \
-     Enable exactly one of: `tokio` for cross-platform compatibility, \
-     or `monoio` for io_uring via Monoio (Linux 6.1+). \
-     Example: harrow = {{ version = \"0.10\", features = [\"tokio\"] }}"
-);
+pub use harrow_server_monoio::{ServerConfig, run, run_with_config};
 
 /// Runtime-specific server APIs.
 ///
@@ -86,6 +75,10 @@ pub mod runtime {
     /// Monoio-based server (io_uring + thread-per-core).
     ///
     /// Available when the `monoio` feature is enabled.
+    ///
+    /// The root `harrow` crate intentionally exposes only the smaller
+    /// high-level bootstrap surface here. Advanced lifecycle control remains in
+    /// the `harrow-server-monoio` crate.
     /// Falls back to epoll on non-Linux platforms, but io_uring is required
     /// for the intended performance characteristics.
     ///
@@ -95,10 +88,7 @@ pub mod runtime {
     #[cfg(feature = "monoio")]
     pub mod monoio {
         pub use harrow_server_monoio::kernel_check::{IoDriver, detect_io_driver};
-        pub use harrow_server_monoio::{
-            ServerConfig, ServerHandle, run, run_with_config, serve, serve_with_config,
-            serve_with_shutdown, start, start_with_config,
-        };
+        pub use harrow_server_monoio::{ServerConfig, run, run_with_config};
     }
 }
 

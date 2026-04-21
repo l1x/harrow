@@ -1,5 +1,8 @@
 # Harrow: A Thin, Macro-Free HTTP Framework
 
+> Historical product/design document. For the current product scope and support
+> policy, see [harrow-1.0.md](./harrow-1.0.md).
+
 **Status:** Draft
 **Date:** 2026-02-19
 **Author:** l1x
