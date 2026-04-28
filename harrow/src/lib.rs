@@ -37,9 +37,8 @@
 //!
 //! The shared HTTP/1 dispatcher shape is documented in
 //! [`docs/h1-dispatcher-design.md`](../docs/h1-dispatcher-design.md). The
-//! earlier runtime rewrite strategy is preserved as a historical implementation
-//! note in
-//! [`docs/strategy-local-workers.md`](../docs/strategy-local-workers.md).
+//! backend support policy is summarized in
+//! [`docs/backend-support.md`](../docs/backend-support.md).
 
 pub use harrow_core::client::{Client, TestResponse};
 pub use harrow_core::handler;
@@ -126,6 +125,11 @@ pub use harrow_middleware::rate_limit::{
 #[cfg(feature = "session")]
 pub use harrow_middleware::session::{
     SameSite, Session, SessionConfig, SessionMiddleware, SessionStore, session_middleware,
+};
+
+#[cfg(feature = "security-headers")]
+pub use harrow_middleware::security_headers::{
+    SecurityHeadersConfig, SecurityHeadersMiddleware, security_headers_middleware,
 };
 
 #[cfg(feature = "openapi")]

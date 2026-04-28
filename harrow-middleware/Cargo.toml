@@ -18,6 +18,7 @@ compression = ["dep:flate2"]
 compression-br = ["compression", "dep:brotli"]
 rate-limit = []
 session = ["dep:blake3", "dep:getrandom"]
+security-headers = []
 
 [dependencies]
 harrow-core = { workspace = true }

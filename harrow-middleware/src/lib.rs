@@ -21,3 +21,6 @@ pub mod rate_limit;
 
 #[cfg(feature = "session")]
 pub mod session;
+
+#[cfg(feature = "security-headers")]
+pub mod security_headers;
