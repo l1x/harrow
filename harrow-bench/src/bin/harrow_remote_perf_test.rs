@@ -181,8 +181,6 @@ enum Backend {
     Monoio,
     /// Meguri - direct io_uring runtime used by Harrow
     Meguri,
-    /// Compio - io_uring-based runtime used by ntex-compio
-    Compio,
 }
 
 impl Backend {
@@ -191,7 +189,6 @@ impl Backend {
             "tokio" => Some(Self::Tokio),
             "monoio" => Some(Self::Monoio),
             "meguri" => Some(Self::Meguri),
-            "compio" => Some(Self::Compio),
             _ => None,
         }
     }
@@ -201,7 +198,6 @@ impl Backend {
             Self::Tokio => "tokio",
             Self::Monoio => "monoio",
             Self::Meguri => "meguri",
-            Self::Compio => "compio",
         }
     }
 }
@@ -240,17 +236,9 @@ impl Framework {
                 let suffix = alloc.suffix();
                 format!("harrow-perf-server{suffix}")
             }
-            (Self::Harrow, Backend::Compio) => unreachable!("harrow does not support compio"),
             (Self::Axum, _) => {
                 let suffix = alloc.suffix();
                 format!("axum-perf-server{suffix}")
-            }
-            (Self::Ntex, Backend::Compio) => {
-                let alloc_tag = match alloc {
-                    Allocator::Mimalloc => "mimalloc",
-                    Allocator::System => "sysalloc",
-                };
-                format!("harrow-bench:prod-{alloc_tag}-{HARROW_VERSION}")
             }
             (Self::Ntex, _) => {
                 let suffix = alloc.suffix();
@@ -267,12 +255,10 @@ impl Framework {
                 let suffix = alloc.suffix();
                 format!("harrow-perf-server{suffix}")
             }
-            (Self::Harrow, Backend::Compio) => unreachable!("harrow does not support compio"),
             (Self::Axum, _) => {
                 let suffix = alloc.suffix();
                 format!("axum-perf-server{suffix}")
             }
-            (Self::Ntex, Backend::Compio) => "ntex-compio-perf-server".to_string(),
             (Self::Ntex, _) => {
                 let suffix = alloc.suffix();
                 format!("ntex-perf-server{suffix}")
@@ -291,11 +277,7 @@ impl Framework {
             (Self::Harrow, Backend::Tokio) => {
                 format!("/harrow-perf-server --bind 0.0.0.0 --port {port}")
             }
-            (Self::Harrow, Backend::Compio) => unreachable!("harrow does not support compio"),
             (Self::Axum, _) => format!("/axum-perf-server --bind 0.0.0.0 --port {port}"),
-            (Self::Ntex, Backend::Compio) => {
-                format!("/usr/local/bin/ntex-compio-perf-server --bind 0.0.0.0 --port {port}")
-            }
             (Self::Ntex, _) => format!("/ntex-perf-server --bind 0.0.0.0 --port {port}"),
         };
         if extra_flags.is_empty() {
@@ -308,11 +290,10 @@ impl Framework {
     fn supports_backend(self, backend: Backend) -> bool {
         match (self, backend) {
             (Self::Harrow, Backend::Tokio | Backend::Monoio | Backend::Meguri) => true,
-            (Self::Harrow, Backend::Compio) => false,
-            (Self::Axum, Backend::Monoio | Backend::Meguri | Backend::Compio) => false,
+            (Self::Axum, Backend::Monoio | Backend::Meguri) => false,
             (Self::Axum, Backend::Tokio) => true,
             (Self::Ntex, Backend::Monoio | Backend::Meguri) => false,
-            (Self::Ntex, Backend::Tokio | Backend::Compio) => true,
+            (Self::Ntex, Backend::Tokio) => true,
         }
     }
 }
@@ -440,7 +421,7 @@ fn usage() -> ! {
          \x20 --allocator ALLOC      Allocator: mimalloc|system (default: mimalloc)\n\
          \x20 --compare MODE         Comparison mode: framework|allocator|single\n\
          \x20 --framework FW         Framework: harrow|axum|ntex (default: harrow)\n\
-         \x20 --backend BACKEND      Runtime backend: tokio|monoio|compio (default: tokio)\n\
+         \x20 --backend BACKEND      Runtime backend: tokio|monoio|meguri (default: tokio)\n\
          \n\
          EXAMPLES:\n\
          \n\
@@ -672,7 +653,7 @@ fn parse_args() -> Args {
             backend.as_str()
         );
         eprintln!(
-            "note: Axum only supports Tokio; Harrow supports Tokio/Monoio/Meguri; ntex supports Tokio/Compio"
+            "note: Axum and ntex support Tokio in this harness; Harrow supports Tokio/Monoio/Meguri"
         );
         usage();
     }
@@ -840,10 +821,7 @@ fn start_server_container(
     );
 
     // io_uring requires unconfined seccomp (Docker blocks io_uring syscalls by default)
-    let seccomp = if matches!(
-        args.backend,
-        Backend::Monoio | Backend::Meguri | Backend::Compio
-    ) {
+    let seccomp = if matches!(args.backend, Backend::Monoio | Backend::Meguri) {
         " --security-opt seccomp=unconfined"
     } else {
         ""

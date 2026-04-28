@@ -375,14 +375,13 @@ cargo run -p harrow-bench --release --bin bench-compare -- \
 """
 
 [tasks."bench:run:runtime-matrix"]
-description = "Run the 5-way runtime matrix: Harrow Tokio/Monoio/Meguri vs ntex Tokio/Compio"
+description = "Run the runtime matrix: Harrow Tokio/Monoio/Meguri vs ntex Tokio"
 run = """
 eval "$(bash infra/scripts/bench-addresses.sh --exports)"
 IMPLS="harrow-tokio-prod-mimalloc-${HARROW_VERSION}
 harrow-monoio-prod-mimalloc-${HARROW_VERSION}
 harrow-meguri-prod-mimalloc-${HARROW_VERSION}
-ntex-tokio-prod-mimalloc-3.7.2
-ntex-compio-prod-mimalloc-3.7.2"
+ntex-tokio-prod-mimalloc-3.7.2"
 
 for IMPL in $IMPLS; do
   echo "========== ${IMPL} =========="
@@ -430,8 +429,7 @@ warp-tokio-prod-jemalloc-0.4.2
 warp-tokio-prod-sysalloc-0.4.2
 ntex-tokio-prod-mimalloc-3.7.2
 ntex-tokio-prod-jemalloc-3.7.2
-ntex-tokio-prod-sysalloc-3.7.2
-ntex-compio-prod-mimalloc-3.7.2"
+ntex-tokio-prod-sysalloc-3.7.2"
 
 for IMPL in $IMPLS; do
   echo "========== ${IMPL} =========="
@@ -543,19 +541,3 @@ run = "cargo run -p harrow-bench --release --bin bench-single -- --impl ntex-tok
 description = "Bench ntex-tokio-prod-sysalloc-3.7.2"
 run = "cargo run -p harrow-bench --release --bin bench-single -- --impl ntex-tokio-prod-sysalloc-3.7.2 --suite harrow-bench/suites/framework-comparison.toml --registry harrow-bench/implementations.toml --mode remote --server-ssh ${BENCH_SERVER_IP} --client-ssh ${BENCH_CLIENT_IP} --server-private-ip ${BENCH_SERVER_PRIVATE_IP} --no-build-missing --duration 30 --warmup 5"
 
-[tasks."bench:run:ntex-compio-mimalloc"]
-description = "Bench ntex-compio-prod-mimalloc-3.7.2"
-run = """
-eval "$(bash infra/scripts/bench-addresses.sh --exports)"
-cargo run -p harrow-bench --release --bin bench-single -- \
-  --impl ntex-compio-prod-mimalloc-3.7.2 \
-  --suite harrow-bench/suites/framework-comparison.toml \
-  --registry harrow-bench/implementations.toml \
-  --mode remote \
-  --server-ssh ${BENCH_SERVER_IP} \
-  --client-ssh ${BENCH_CLIENT_IP} \
-  --server-private-ip ${BENCH_SERVER_PRIVATE_IP} \
-  --no-build-missing \
-  --duration 30 \
-  --warmup 5
-"""

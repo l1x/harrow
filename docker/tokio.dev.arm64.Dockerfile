@@ -16,7 +16,6 @@ COPY harrow-server-monoio/Cargo.toml harrow-server-monoio/Cargo.toml
 COPY harrow-server-meguri/Cargo.toml harrow-server-meguri/Cargo.toml
 COPY meguri/Cargo.toml meguri/Cargo.toml
 COPY harrow-bench/Cargo.toml harrow-bench/Cargo.toml
-COPY ntex-compio-bench/Cargo.toml ntex-compio-bench/Cargo.toml
 
 # Cargo needs target entrypoints present to resolve the workspace during fetch.
 COPY harrow/examples harrow/examples
@@ -35,7 +34,6 @@ COPY meguri/src/lib.rs meguri/src/lib.rs
 COPY harrow-bench/benches harrow-bench/benches
 COPY harrow-bench/src/lib.rs harrow-bench/src/lib.rs
 COPY harrow-bench/src/bin harrow-bench/src/bin
-COPY ntex-compio-bench/src/main.rs ntex-compio-bench/src/main.rs
 
 RUN rustup target add aarch64-unknown-linux-gnu && \
     cargo fetch --locked --target=aarch64-unknown-linux-gnu
@@ -53,7 +51,6 @@ COPY harrow-server-monoio/src harrow-server-monoio/src
 COPY harrow-server-meguri/src harrow-server-meguri/src
 COPY meguri/src meguri/src
 COPY harrow-bench/src harrow-bench/src
-COPY ntex-compio-bench/src ntex-compio-bench/src
 
 RUN cargo build --locked --target=aarch64-unknown-linux-gnu \
         -p harrow-bench \

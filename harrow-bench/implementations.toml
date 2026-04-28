@@ -217,12 +217,3 @@ profile = "prod"
 health_path = "/health"
 platform = "linux/arm64"
 
-[[implementation]]
-id = "ntex-compio-prod-mimalloc-3.7.2"
-image = "harrow-bench:prod-mimalloc-${HARROW_VERSION}"
-command = "/usr/local/bin/ntex-compio-perf-server --bind 0.0.0.0 --port {{ port }}"
-framework = "ntex"
-backend = "compio"
-profile = "prod"
-health_path = "/health"
-platform = "linux/arm64"

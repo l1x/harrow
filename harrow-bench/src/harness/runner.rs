@@ -723,7 +723,7 @@ fn start_server_container(
 }
 
 fn backend_requires_privileged(backend: Option<&str>) -> bool {
-    matches!(backend, Some("monoio" | "meguri" | "compio"))
+    matches!(backend, Some("monoio" | "meguri"))
 }
 
 fn stop_server_container(config: &CommonRunConfig, variant: &RunVariant) {
