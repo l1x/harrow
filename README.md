@@ -136,6 +136,7 @@ let app = App::new()
 - [Docs index](docs/index.md) -- current docs map and reading order
 - [What Harrow is](docs/what-is-harrow.md) -- short product identity, priorities, and non-goals
 - [Plan and status](docs/roadmap.md) -- current 0.10 -> 1.0 implementation plan
+- [Feature status](docs/features.md) -- implemented, partial, and missing functionality matrix
 - [Backend support](docs/backend-support.md) -- Tokio, Monoio, and Meguri support matrix
 - [Server lifecycle](docs/server-lifecycle.md) -- workers, limits, timeouts, and graceful shutdown
 - [Deployment](docs/deployment.md) -- production notes for Tokio and Monoio

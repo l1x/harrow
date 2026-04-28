@@ -7,6 +7,7 @@ of documents needed for the task.
 
 - [What Harrow Is](./what-is-harrow.md): short product identity and non-goals.
 - [Plan and Status](./roadmap.md): current 0.10 -> 1.0 implementation plan.
+- [Feature Status](./features.md): current implemented/partial/missing feature matrix.
 - [Harrow 1.0 PRD](./prds/harrow-1.0.md): detailed product/support source of truth.
 - [Backend Support](./backend-support.md): Tokio, Monoio, and Meguri support matrix.
 - [Server Lifecycle](./server-lifecycle.md): startup, workers, timeouts, limits, graceful shutdown.
@@ -26,9 +27,10 @@ of documents needed for the task.
 ### Understand Harrow
 
 1. [What Harrow Is](./what-is-harrow.md)
-2. [Plan and Status](./roadmap.md)
-3. [Backend Support](./backend-support.md)
-4. [README](../README.md)
+2. [Feature Status](./features.md)
+3. [Plan and Status](./roadmap.md)
+4. [Backend Support](./backend-support.md)
+5. [README](../README.md)
 
 ### Backend or server lifecycle work
 
