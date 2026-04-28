@@ -20,6 +20,7 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
 | --- | --- |
 | Core request/response/routing | Implemented |
 | Custom HTTP/1 codec and dispatcher shape | Implemented |
+| HTTP/2 backend support | 1.0 target; Monoio partial, Tokio/Meguri pending |
 | Tokio custom HTTP/1 backend | First-class, public |
 | Monoio HTTP/1 backend | First-class, public Linux backend |
 | Meguri direct io_uring backend | Experimental workspace backend |
@@ -36,10 +37,10 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
    - Move uncertain/historical docs to `docs/old/`.
    - Link current docs from `README.md` and `docs/index.md`.
 
-2. **Clarify backend support**
+2. **Clarify and complete backend support**
    - Tokio and Monoio are first-class.
-   - Meguri is experimental.
-   - HTTP/2 is not a broad 1.0 promise.
+   - Meguri is experimental until it meets the same protocol/lifecycle bar.
+   - HTTP/2 support/parity is required before 1.0, or unsupported backends must be explicitly downgraded.
 
 3. **Document operations**
    - server lifecycle;
@@ -60,7 +61,6 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
 
 ## Later / Research
 
-- HTTP/2 stabilization policy after 1.0 scope is closed.
 - PROXY protocol support for L4 load balancer deployments.
 - SSE helper and realtime examples.
 - Auth middleware beyond the current core operational middleware.

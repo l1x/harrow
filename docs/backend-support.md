@@ -18,7 +18,7 @@ crate directly.
 | --- | --- | --- | --- |
 | HTTP/1.1 | First-class | First-class | Experimental |
 | Custom Harrow H1 path | Yes | Yes | Yes |
-| HTTP/2 | Not a 1.0 public promise | Present in backend crate; policy experimental/narrow | No |
+| HTTP/2 | Planned for 1.0; not implemented yet | Partial/backend-local implementation and tests; needs stabilization | Planned for parity before stabilization |
 | HTTP/3 / QUIC | No | No | No |
 | WebSocket | Tokio feature (`ws`) | Not public root API | No |
 | SSE / streaming responses | Framework response API; backend support expected through normal responses | Framework response API; verify per use case | Experimental |
@@ -63,14 +63,16 @@ Harrow's stable root API for the 1.0 line.
 
 ## HTTP/2 Policy
 
-The 1.0 product line is HTTP/1-centered. Monoio has HTTP/2 implementation and
-tests in the backend crate, but Harrow should not market broad HTTP/2 support
-until the support policy, examples, interoperability expectations, and benchmark
-story are explicit.
+HTTP/2 is now a 1.0 target for Harrow's server backends. HTTP/1.1 remains the
+most mature path today, but the 1.0 support story should not leave HTTP/2 as a
+Monoio-only or backend-local capability.
 
-For now:
+Current status:
 
-- HTTP/1.1 is the stable transport target.
-- Monoio HTTP/2 is backend-local and should be treated as experimental/narrow.
-- Tokio HTTP/2 is not part of the current custom server surface.
-- HTTP/3/QUIC is out of scope for 1.0.
+- Monoio has partial HTTP/2 implementation and tests in the backend crate.
+- Tokio custom HTTP/1 does not yet expose an HTTP/2 server path.
+- Meguri does not yet support HTTP/2 and remains experimental.
+
+Before 1.0, Harrow should either provide HTTP/2 parity across the server
+backends or explicitly downgrade any backend that cannot meet that support bar.
+HTTP/3/QUIC remains out of scope for 1.0.

@@ -26,7 +26,7 @@ platform. Its strongest supported path is:
 | --- | --- | --- |
 | HTTP/1.1 | ✅ | Core supported transport. Custom Harrow H1 path across Tokio, Monoio, and experimental Meguri. |
 | REST-style HTTP APIs | ✅ | Strong fit for JSON/text API backends. |
-| HTTP/2 | 🟡 | Monoio backend has H2 code/tests, but broad H2 support is not a 1.0 public promise. |
+| HTTP/2 | 🟡 | Required before 1.0 across Harrow server backends. Monoio has partial H2 code/tests today; Tokio and Meguri still need implementation. |
 | HTTP/3 / QUIC | ❌ | Not implemented. |
 | WebSocket | 🟡 | Tokio-side `ws` feature exists. Not backend-universal. |
 | Streaming responses | ✅ | `Response::streaming` exists. Needs more examples/helpers. |
@@ -48,7 +48,7 @@ platform. Its strongest supported path is:
 | Compio backend | ❌ | Not supported. |
 | Same app mental model across runtimes | ✅ | `App`, `Request`, `Response`, middleware, and request helpers are shared across Tokio and Monoio. |
 | TLS | 🟡 | Tokio-oriented feature surface exists; final support wording should be audited before 1.0. |
-| HTTP/2 on all public runtimes | ❌ | Not supported as a broad Tokio+Monoio guarantee. |
+| HTTP/2 on all server backends | 🟡 | 1.0 target. Monoio is partial; Tokio and Meguri need implementation/parity work. |
 
 ## Application Primitives
 
@@ -163,8 +163,9 @@ handler signatures. See [Request Helpers](./request-helpers.md) and
 Likely pre-1.0 polish candidates:
 
 - feature-combination verification;
+- HTTP/2 support/parity across Tokio, Monoio, and Meguri server backends;
 - backend wording audit for TLS, WebSocket, and HTTP/2;
-- examples for security headers, graceful shutdown, observability, and request helpers;
+- examples for security headers, graceful shutdown, observability, request helpers, and HTTP/2;
 - SSE helper or example;
 - typed `param` / `query_param` parse helpers;
 - fresh runtime matrix benchmark.
@@ -177,7 +178,6 @@ Likely post-1.0 candidates:
 - `Accept` and `Range` helpers;
 - PROXY protocol;
 - Unix sockets;
-- HTTP/2 stabilization;
 - HTTP/3/QUIC research;
 - SIMD JSON research;
 - static files.
