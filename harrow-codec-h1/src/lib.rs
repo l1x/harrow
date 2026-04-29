@@ -147,23 +147,7 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
                 ));
             }
             seen_te = true;
-            if version == Version::HTTP_11
-                && let Ok(s) = std::str::from_utf8(h.value)
-            {
-                // Parse all tokens. Only "chunked" is supported.
-                // Reject unsupported codings (e.g., "gzip") to prevent
-                // request smuggling from framing disagreements.
-                for token in s.split(',') {
-                    let token = token.trim();
-                    if token.eq_ignore_ascii_case("chunked") {
-                        chunked = true;
-                    } else if !token.eq_ignore_ascii_case("identity") && !token.is_empty() {
-                        return Err(CodecError::Invalid(format!(
-                            "unsupported transfer-encoding: {token}"
-                        )));
-                    }
-                }
-            }
+            chunked = parse_transfer_encoding(h.value, version)?;
         } else if name == CONNECTION {
             if let Ok(s) = std::str::from_utf8(h.value) {
                 for token in s.split(',') {
@@ -229,6 +213,31 @@ fn should_keep_alive(version: Version, conn_close: bool, conn_keep_alive: bool) 
         return true;
     }
     version == Version::HTTP_11
+}
+
+fn parse_transfer_encoding(value: &[u8], version: Version) -> Result<bool, CodecError> {
+    if version != Version::HTTP_11 {
+        return Err(CodecError::Invalid(
+            "transfer-encoding requires HTTP/1.1".into(),
+        ));
+    }
+
+    let value = std::str::from_utf8(value)
+        .map_err(|_| CodecError::Invalid("invalid transfer-encoding encoding".into()))?;
+
+    let mut tokens = value.split(',').map(str::trim);
+    match (tokens.next(), tokens.next()) {
+        (Some(token), None) if token.eq_ignore_ascii_case("chunked") => Ok(true),
+        (Some(""), _) | (None, _) => {
+            Err(CodecError::Invalid("empty transfer-encoding value".into()))
+        }
+        (Some(token), None) => Err(CodecError::Invalid(format!(
+            "unsupported transfer-encoding: {token}"
+        ))),
+        _ => Err(CodecError::Invalid(
+            "only a single chunked transfer-encoding is supported".into(),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -831,17 +840,49 @@ mod tests {
     }
 
     #[test]
-    fn chunked_in_comma_list_with_identity() {
-        // "identity, chunked" is valid — identity is the only supported non-chunked coding.
-        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity, chunked\r\n\r\n";
-        assert!(try_parse_request(req).unwrap().chunked);
+    fn reject_identity_transfer_encoding() {
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity\r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_comma_separated_transfer_encoding() {
+        for req in [
+            &b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity, chunked\r\n\r\n"[..],
+            &b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"[..],
+            &b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"[..],
+        ] {
+            assert!(matches!(
+                try_parse_request(req),
+                Err(CodecError::Invalid(_))
+            ));
+        }
     }
 
     #[test]
     fn reject_unsupported_transfer_encoding() {
-        // "gzip, chunked" is rejected because gzip is not supported.
-        let req =
-            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_empty_transfer_encoding_token() {
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, \r\n\r\n";
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_invalid_transfer_encoding_bytes() {
+        let req = b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: \xff\r\n\r\n";
         assert!(matches!(
             try_parse_request(req),
             Err(CodecError::Invalid(_))
@@ -876,11 +917,12 @@ mod tests {
     }
 
     #[test]
-    fn transfer_encoding_ignored_on_http10() {
-        // HTTP/1.0 TE without CL — TE is ignored, no body.
+    fn reject_transfer_encoding_on_http10() {
         let req = b"GET / HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
-        let parsed = try_parse_request(req).unwrap();
-        assert!(!parsed.chunked);
+        assert!(matches!(
+            try_parse_request(req),
+            Err(CodecError::Invalid(_))
+        ));
     }
 
     #[test]
