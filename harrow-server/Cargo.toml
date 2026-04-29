@@ -12,6 +12,7 @@ bytes = { workspace = true }
 harrow-codec-h1 = { workspace = true }
 harrow-core = { workspace = true }
 http = { workspace = true }
+http-body = { workspace = true }
 socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]

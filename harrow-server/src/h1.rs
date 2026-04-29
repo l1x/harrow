@@ -1,4 +1,6 @@
 use bytes::Bytes;
+use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING};
+use http_body::Body as _;
 use std::sync::Arc;
 
 use harrow_codec_h1::{CodecError, ParsedRequest};
@@ -45,10 +47,7 @@ pub async fn dispatch_parsed_request(
 }
 
 pub fn response_body_permitted(is_head_request: bool, status: http::StatusCode) -> bool {
-    !is_head_request
-        && !status.is_informational()
-        && status != http::StatusCode::NO_CONTENT
-        && status != http::StatusCode::NOT_MODIFIED
+    !is_head_request && response_status_permits_body(status)
 }
 
 pub fn declared_content_length(headers: &http::HeaderMap) -> Result<Option<usize>, &'static str> {
@@ -82,17 +81,28 @@ pub fn prepare_response(
 ) -> Result<PreparedResponse, ResponseStreamError> {
     let (mut parts, body) = response.into_parts();
 
-    if !keep_alive && !parts.headers.contains_key(http::header::CONNECTION) {
-        parts
-            .headers
-            .insert(http::header::CONNECTION, "close".parse().unwrap());
-    }
+    normalize_response_headers(
+        &mut parts.headers,
+        parts.status,
+        keep_alive,
+        is_head_request,
+    );
 
     let plan = ResponseWritePlan::new(&parts.headers, is_head_request, parts.status);
     let expected_len = match plan.mode {
-        ResponseBodyMode::Fixed => declared_content_length(&parts.headers)
-            .map_err(std::io::Error::other)?
-            .ok_or_else(|| std::io::Error::other("fixed response missing content-length"))?,
+        ResponseBodyMode::Fixed => {
+            let expected_len = declared_content_length(&parts.headers)
+                .map_err(std::io::Error::other)?
+                .ok_or_else(|| std::io::Error::other("fixed response missing content-length"))?;
+            if let Some(actual_len) = body.size_hint().exact()
+                && actual_len != expected_len as u64
+            {
+                return Err(Box::new(std::io::Error::other(
+                    "response body length does not match declared content-length",
+                )));
+            }
+            expected_len
+        }
         _ => 0,
     };
 
@@ -103,6 +113,35 @@ pub fn prepare_response(
         plan,
         expected_len,
     })
+}
+
+fn normalize_response_headers(
+    headers: &mut http::HeaderMap,
+    status: http::StatusCode,
+    keep_alive: bool,
+    is_head_request: bool,
+) {
+    // Harrow owns HTTP/1 hop-by-hop/framing headers. Application responses
+    // should not be able to create duplicate or contradictory wire framing.
+    headers.remove(CONNECTION);
+    headers.remove(TRANSFER_ENCODING);
+    headers.remove(http::header::HeaderName::from_static("keep-alive"));
+    headers.remove(http::header::HeaderName::from_static("proxy-connection"));
+    headers.remove(http::header::HeaderName::from_static("upgrade"));
+
+    if !response_status_permits_body(status) && !is_head_request {
+        headers.remove(CONTENT_LENGTH);
+    }
+
+    if !keep_alive {
+        headers.insert(CONNECTION, http::HeaderValue::from_static("close"));
+    }
+}
+
+fn response_status_permits_body(status: http::StatusCode) -> bool {
+    !status.is_informational()
+        && status != http::StatusCode::NO_CONTENT
+        && status != http::StatusCode::NOT_MODIFIED
 }
 
 pub fn record_fixed_response_bytes(
@@ -390,6 +429,67 @@ mod tests {
         assert!(String::from_utf8_lossy(&head).contains("connection: close\r\n"));
         assert_eq!(prepared.plan.mode, ResponseBodyMode::Fixed);
         assert_eq!(prepared.expected_len, 5);
+    }
+
+    #[test]
+    fn prepare_response_removes_app_supplied_transfer_encoding() {
+        let response = Response::text("hello")
+            .header("transfer-encoding", "gzip")
+            .into_inner();
+
+        let prepared = prepare_response(response, true, false).expect("prepared response");
+
+        assert!(prepared.headers.get(TRANSFER_ENCODING).is_none());
+        assert_eq!(prepared.plan.mode, ResponseBodyMode::Fixed);
+        assert_eq!(prepared.expected_len, 5);
+    }
+
+    #[test]
+    fn prepare_response_overrides_app_connection_header() {
+        let response = Response::text("hello")
+            .header("connection", "keep-alive")
+            .into_inner();
+
+        let prepared = prepare_response(response, false, false).expect("prepared response");
+
+        assert_eq!(prepared.headers.get(CONNECTION).unwrap(), "close");
+    }
+
+    #[test]
+    fn prepare_response_rejects_wrong_exact_content_length() {
+        let response = Response::text("hello")
+            .header("content-length", "4")
+            .into_inner();
+
+        let Err(err) = prepare_response(response, true, false) else {
+            panic!("length mismatch should fail");
+        };
+
+        assert!(err.to_string().contains("declared content-length"));
+    }
+
+    #[test]
+    fn prepare_response_strips_body_framing_for_204() {
+        let response = Response::new(http::StatusCode::NO_CONTENT, "")
+            .header("content-length", "0")
+            .header("transfer-encoding", "chunked")
+            .into_inner();
+
+        let prepared = prepare_response(response, true, false).expect("prepared response");
+
+        assert_eq!(prepared.plan.mode, ResponseBodyMode::None);
+        assert!(prepared.headers.get(CONTENT_LENGTH).is_none());
+        assert!(prepared.headers.get(TRANSFER_ENCODING).is_none());
+    }
+
+    #[test]
+    fn prepare_response_preserves_head_content_length() {
+        let response = Response::text("hello").into_inner();
+
+        let prepared = prepare_response(response, true, true).expect("prepared response");
+
+        assert_eq!(prepared.plan.mode, ResponseBodyMode::None);
+        assert_eq!(prepared.headers.get(CONTENT_LENGTH).unwrap(), "5");
     }
 
     #[test]

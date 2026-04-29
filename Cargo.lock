@@ -1412,6 +1412,7 @@ dependencies = [
  "harrow-codec-h1",
  "harrow-core",
  "http",
+ "http-body",
  "http-body-util",
  "socket2 0.5.10",
 ]
