@@ -47,6 +47,7 @@ pub struct ParsedRequest {
 #[derive(Debug)]
 pub enum CodecError {
     Incomplete,
+    HeadersTooLarge,
     BodyTooLarge,
     Invalid(String),
 }
@@ -55,6 +56,7 @@ impl std::fmt::Display for CodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CodecError::Incomplete => write!(f, "incomplete HTTP request"),
+            CodecError::HeadersTooLarge => write!(f, "request headers too large"),
             CodecError::BodyTooLarge => write!(f, "body too large"),
             CodecError::Invalid(msg) => write!(f, "invalid HTTP request: {msg}"),
         }
@@ -73,9 +75,18 @@ pub fn try_parse_request(buf: &[u8]) -> Result<ParsedRequest, CodecError> {
 
     let header_len = match parsed.parse(buf) {
         Ok(httparse::Status::Complete(len)) => len,
-        Ok(httparse::Status::Partial) => return Err(CodecError::Incomplete),
+        Ok(httparse::Status::Partial) => {
+            if buf.len() >= MAX_HEADER_BUF {
+                return Err(CodecError::HeadersTooLarge);
+            }
+            return Err(CodecError::Incomplete);
+        }
         Err(e) => return Err(CodecError::Invalid(e.to_string())),
     };
+
+    if header_len > MAX_HEADER_BUF {
+        return Err(CodecError::HeadersTooLarge);
+    }
 
     let method = parsed
         .method
@@ -758,6 +769,39 @@ mod tests {
             try_parse_request(b"GET /hello HTTP/1.1\r\nHost: loc"),
             Err(CodecError::Incomplete)
         ));
+    }
+
+    #[test]
+    fn reject_incomplete_headers_at_max_header_buf() {
+        let mut req = b"GET / HTTP/1.1\r\nx-large: ".to_vec();
+        req.resize(MAX_HEADER_BUF, b'a');
+        assert_eq!(req.len(), MAX_HEADER_BUF);
+        assert!(matches!(
+            try_parse_request(&req),
+            Err(CodecError::HeadersTooLarge)
+        ));
+    }
+
+    #[test]
+    fn reject_complete_headers_over_max_header_buf() {
+        let mut req = b"GET / HTTP/1.1\r\nx-large: ".to_vec();
+        req.resize(MAX_HEADER_BUF + 1, b'a');
+        req.extend_from_slice(b"\r\n\r\n");
+        assert!(matches!(
+            try_parse_request(&req),
+            Err(CodecError::HeadersTooLarge)
+        ));
+    }
+
+    #[test]
+    fn accept_small_headers_with_large_buffered_body() {
+        let mut req =
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 70000\r\n\r\n".to_vec();
+        req.extend(std::iter::repeat_n(b'x', MAX_HEADER_BUF + 1));
+        assert!(req.len() > MAX_HEADER_BUF);
+        let parsed = try_parse_request(&req).unwrap();
+        assert!(parsed.header_len < MAX_HEADER_BUF);
+        assert_eq!(parsed.content_length, Some(70000));
     }
 
     #[test]

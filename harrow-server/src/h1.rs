@@ -208,6 +208,7 @@ impl ErrorResponse {
     pub fn from_codec_error(err: &CodecError) -> Self {
         match err {
             CodecError::Incomplete | CodecError::Invalid(_) => Self::BadRequest,
+            CodecError::HeadersTooLarge => Self::RequestHeadersTooLarge,
             CodecError::BodyTooLarge => Self::PayloadTooLarge,
         }
     }

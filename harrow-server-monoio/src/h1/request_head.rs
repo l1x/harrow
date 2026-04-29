@@ -7,9 +7,6 @@ use crate::codec;
 use crate::h1::dispatcher::H1Connection;
 use crate::protocol::ProtocolError;
 
-/// Maximum size of the header read buffer (64 KiB).
-const MAX_HEADER_BUF: usize = 64 * 1024;
-
 impl H1Connection {
     /// Read HTTP headers from the stream into `buf`.
     ///
@@ -27,18 +24,17 @@ impl H1Connection {
                     return Ok(parsed);
                 }
                 Err(codec::CodecError::Incomplete) => {}
+                Err(codec::CodecError::HeadersTooLarge) => {
+                    return Err(ProtocolError::ProtocolViolation(
+                        "request headers too large".into(),
+                    ));
+                }
                 Err(codec::CodecError::Invalid(msg)) => {
                     return Err(ProtocolError::Parse(msg));
                 }
                 Err(codec::CodecError::BodyTooLarge) => {
                     return Err(ProtocolError::BodyTooLarge);
                 }
-            }
-
-            if self.buf.len() >= MAX_HEADER_BUF {
-                return Err(ProtocolError::ProtocolViolation(
-                    "request headers too large".into(),
-                ));
             }
 
             let n = self

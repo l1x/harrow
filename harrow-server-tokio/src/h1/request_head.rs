@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use tokio::io::AsyncReadExt;
 
-use harrow_codec_h1::{CodecError, MAX_HEADER_BUF, ParsedRequest, try_parse_request};
+use harrow_codec_h1::{CodecError, ParsedRequest, try_parse_request};
 use harrow_server::h1::ErrorResponse;
 
 use crate::ServerConfig;
@@ -25,15 +25,12 @@ where
     loop {
         match try_parse_request(buf) {
             Ok(parsed) => return RequestHeadRead::Parsed(Box::new(parsed)),
-            Err(CodecError::Incomplete) => {
-                if buf.len() >= MAX_HEADER_BUF {
-                    return RequestHeadRead::WriteError(ErrorResponse::RequestHeadersTooLarge);
-                }
-            }
-            Err(err @ CodecError::Invalid(_)) => {
-                return RequestHeadRead::WriteError(ErrorResponse::from_codec_error(&err));
-            }
-            Err(err @ CodecError::BodyTooLarge) => {
+            Err(CodecError::Incomplete) => {}
+            Err(
+                err @ (CodecError::HeadersTooLarge
+                | CodecError::Invalid(_)
+                | CodecError::BodyTooLarge),
+            ) => {
                 return RequestHeadRead::WriteError(ErrorResponse::from_codec_error(&err));
             }
         }

@@ -233,14 +233,9 @@ impl Conn {
                 self.state = ConnState::Dispatching;
                 ProcessResult::Dispatch
             }
-            Err(CodecError::Incomplete) => {
-                if self.buf.len() >= codec::MAX_HEADER_BUF {
-                    return ProcessResult::WriteError(wire_error(
-                        ErrorResponse::RequestHeadersTooLarge,
-                        false,
-                    ));
-                }
-                ProcessResult::NeedRecv
+            Err(CodecError::Incomplete) => ProcessResult::NeedRecv,
+            Err(CodecError::HeadersTooLarge) => {
+                ProcessResult::WriteError(wire_error(ErrorResponse::RequestHeadersTooLarge, false))
             }
             Err(CodecError::Invalid(_)) => {
                 ProcessResult::WriteError(wire_error(ErrorResponse::BadRequest, false))
