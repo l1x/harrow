@@ -10,6 +10,7 @@ of documents needed for the task.
 - [Feature Status](./features.md): current implemented/partial/missing feature matrix.
 - [Harrow 1.0 PRD](./prds/harrow-1.0.md): detailed product/support source of truth.
 - [Backend Support](./backend-support.md): Tokio, Monoio, and Meguri support matrix.
+- [Protocol Backend Strategy](./protocol-backend-strategy.md): Hyper vs custom H1 tradeoff and 1.0 backend decision gate.
 - [Server Lifecycle](./server-lifecycle.md): startup, workers, timeouts, limits, graceful shutdown.
 - [Deployment](./deployment.md): production deployment notes for Tokio and Monoio.
 - [Request Helpers](./request-helpers.md): explicit request-first handler model.
@@ -35,10 +36,11 @@ of documents needed for the task.
 ### Backend or server lifecycle work
 
 1. [Backend Support](./backend-support.md)
-2. [Server Lifecycle](./server-lifecycle.md)
-3. [Connection Safety](./connection-safety.md)
-4. [HTTP/1 Dispatcher Design](./h1-dispatcher-design.md)
-5. [Verification](./verification.md)
+2. [Protocol Backend Strategy](./protocol-backend-strategy.md)
+3. [Server Lifecycle](./server-lifecycle.md)
+4. [Connection Safety](./connection-safety.md)
+5. [HTTP/1 Dispatcher Design](./h1-dispatcher-design.md)
+6. [Verification](./verification.md)
 
 ### Public API / handler model work
 
@@ -63,8 +65,9 @@ of documents needed for the task.
 
 1. [Performance](./performance.md)
 2. [Backend Support](./backend-support.md)
-3. [Connection Safety](./connection-safety.md)
-4. Historical profiling docs in [old](./old/) only if needed
+3. [Protocol Backend Strategy](./protocol-backend-strategy.md)
+4. [Connection Safety](./connection-safety.md)
+5. Historical profiling docs in [old](./old/) only if needed
 
 ## Historical / Uncertain Docs
 

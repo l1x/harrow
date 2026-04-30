@@ -14,19 +14,22 @@ Legend:
 ## Summary
 
 Harrow is currently a focused HTTP framework, not a full multi-transport
-platform. Its strongest supported path is:
+platform. Its strongest implemented path today is:
 
-> explicit request/response handlers on custom HTTP/1.1 backends, with first-class
+> explicit request/response handlers on custom HTTP/1.1 backends, with public
 > Tokio and Monoio support, opt-in middleware, observability hooks, and lifecycle
 > hardening.
+
+Before 1.0, Harrow will also prototype a Hyper-based Tokio backend so the stable
+production path can be chosen with benchmark data and maintenance risk in view.
 
 ## Transports and Protocols
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| HTTP/1.1 | ✅ | Core supported transport. Custom Harrow H1 path across Tokio, Monoio, and experimental Meguri. |
+| HTTP/1.1 | ✅ | Implemented through custom Harrow H1 path across Tokio, Monoio, and experimental Meguri. Stable-by-default support level is under review pending Hyper comparison and hardening evidence. |
 | REST-style HTTP APIs | ✅ | Strong fit for JSON/text API backends. |
-| HTTP/2 | 🟡 | Required before 1.0 across Harrow server backends. Monoio has partial H2 code/tests today; Tokio and Meguri still need implementation. |
+| HTTP/2 | 🟡 | Required before 1.0 across Harrow server backends. Monoio has partial H2 code/tests today; Tokio may use the planned Hyper backend rather than extending the custom H1 path. |
 | HTTP/3 / QUIC | ❌ | Not implemented. |
 | WebSocket | 🟡 | Tokio-side `ws` feature exists. Not backend-universal. |
 | Streaming responses | ✅ | `Response::streaming` exists. Needs more examples/helpers. |
@@ -42,13 +45,14 @@ platform. Its strongest supported path is:
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Tokio backend | ✅ | First-class public backend. |
-| Monoio backend | ✅ | First-class Linux/io_uring backend. |
+| Tokio custom H1 backend | ✅ | Public backend today; stable 1.0 status under review because Harrow owns protocol correctness. |
+| Tokio Hyper backend | ❌ | Planned prototype to compare Hyper + thread-per-core against custom H1 before the 1.0 backend decision. |
+| Monoio backend | ✅ | Public Linux/io_uring backend; final stable label depends on parity evidence. |
 | Meguri backend | 🟡 | Experimental direct io_uring workspace backend, not re-exported from root `harrow`. |
 | Compio backend | ❌ | Not supported. |
 | Same app mental model across runtimes | ✅ | `App`, `Request`, `Response`, middleware, and request helpers are shared across Tokio and Monoio. |
 | TLS | 🟡 | Tokio-oriented feature surface exists; final support wording should be audited before 1.0. |
-| HTTP/2 on all server backends | 🟡 | 1.0 target. Monoio is partial; Tokio and Meguri need implementation/parity work. |
+| HTTP/2 on all server backends | 🟡 | 1.0 target. Monoio is partial; Tokio Hyper prototype may become the preferred path; Meguri needs a stabilization decision. |
 
 ## Application Primitives
 
@@ -118,7 +122,8 @@ handler signatures. See [Request Helpers](./request-helpers.md) and
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Custom HTTP/1 transport | ✅ | Core differentiator. |
+| Custom HTTP/1 transport | ✅ | Implemented and retained as a reference/advanced-performance path; production-stable status depends on hardening, fuzzing, and benchmark evidence. |
+| Hyper + thread-per-core backend | ❌ | Planned prototype to test whether worker topology gets close to target performance with lower protocol maintenance risk. |
 | JSON buffer reuse | ✅ | Harrow has thread-local JSON buffer/capacity work. |
 | SIMD JSON | ❌ | Not implemented. Evaluate only with benchmarks. |
 | Zero-copy extractors | ❌ | Not implemented. |
@@ -163,8 +168,9 @@ handler signatures. See [Request Helpers](./request-helpers.md) and
 Likely pre-1.0 polish candidates:
 
 - feature-combination verification;
-- HTTP/2 support/parity across Tokio, Monoio, and Meguri server backends;
-- backend wording audit for TLS, WebSocket, and HTTP/2;
+- Hyper + thread-per-core Tokio backend prototype and benchmark comparison;
+- HTTP/2 support/parity across the chosen 1.0 server backends;
+- backend wording audit for TLS, WebSocket, HTTP/2, and custom-H1 stability;
 - examples for security headers, graceful shutdown, observability, request helpers, and HTTP/2;
 - SSE helper or example;
 - typed `param` / `query_param` parse helpers;

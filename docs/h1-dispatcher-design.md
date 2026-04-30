@@ -1,14 +1,20 @@
 # HTTP/1 Dispatcher Design
 
-**Status:** Draft
-**Date:** 2026-04-15
+**Status:** Reference design for the custom H1 path
+
+**Date:** 2026-04-15; strategy checkpoint updated 2026-04-30
+
 **Scope:** `feat/custom-http-backend`
 
 ---
 
 ## 1. Purpose
 
-This document describes the target HTTP/1 dispatcher architecture for Harrow.
+This document describes the target HTTP/1 dispatcher architecture for Harrow's
+custom H1 stack. It remains useful as a reference design, but it is no longer
+the only candidate for the stable 1.0 Tokio backend. See
+[Protocol Backend Strategy](./protocol-backend-strategy.md) for the current
+Hyper-vs-custom-H1 decision checkpoint.
 
 The main goal is to move Harrow's server backends closer to the split that makes
 `ntex` fast and maintainable:
@@ -19,7 +25,10 @@ The main goal is to move Harrow's server backends closer to the split that makes
 - avoid forcing Meguri into abstractions that do not fit its io_uring model yet
 
 This is a protocol-boundary design, not a proposal to copy `ntex`'s full
-`Service`/`Control`/`Filter` stack.
+`Service`/`Control`/`Filter` stack. The custom H1 path should be kept available
+for learning, Monoio/Meguri experiments, and possible future performance wins,
+but it needs adversarial tests, fuzzing, lifecycle parity, and benchmark evidence
+before it should be treated as the default production-stable path.
 
 It is also only half of the architecture decision. The runtime side of that
 decision now lives in

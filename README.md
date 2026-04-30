@@ -1,6 +1,6 @@
 # Harrow
 
-A thin, macro-free HTTP framework with custom HTTP/1 backends, local-worker
+A thin, macro-free HTTP framework with explicit server backends, local-worker
 runtime architecture, and opt-in observability.
 
 ## Features
@@ -9,8 +9,8 @@ runtime architecture, and opt-in observability.
 - **Route introspection** -- the route table is a first-class data structure you can enumerate at startup for OpenAPI generation, health checks, or monitoring config.
 - **Opt-in observability** -- structured logging, OTLP trace export, and request-id propagation are wired in with one call, powered by [rolly](https://github.com/l1x/rolly).
 - **Feature-gated middleware** -- request-id, CORS, catch-panic, compression, session, rate-limit, security headers, and o11y are opt-in via Cargo features. Nothing compiles unless you ask for it.
-- **Fast** -- custom HTTP/1 transport with shared codec/dispatcher pieces, `matchit` routing, and no Tower or `BoxCloneService`.
-- **Pluggable server backends** -- choose between Tokio/custom HTTP/1 (cross-platform) or Monoio/io_uring (Linux high-performance).
+- **Fast** -- `matchit` routing, no Tower or `BoxCloneService`, and backend work focused on local-worker/thread-per-core performance.
+- **Pluggable server backends** -- choose between Tokio/custom HTTP/1 (cross-platform today) or Monoio/io_uring (Linux high-performance), with a Tokio Hyper prototype planned before the final 1.0 backend commitment.
 
 ## Server Backends
 
@@ -20,8 +20,9 @@ server entrypoints appear when you enable one:
 
 | Backend               | Feature  | Best For                                | Platform              |
 | --------------------- | -------- | --------------------------------------- | --------------------- |
-| **Tokio + custom HTTP/1** | `tokio`  | Cross-platform, development, containers | Linux, macOS, Windows |
-| **Monoio + io_uring**     | `monoio` | Maximum throughput on Linux 6.1+        | Linux 6.1+ only       |
+| **Tokio + custom HTTP/1** | `tokio`  | Cross-platform today; stable 1.0 status under review | Linux, macOS, Windows |
+| **Tokio + Hyper**         | planned  | Prototype to compare Hyper + thread-per-core vs custom H1 | Linux, macOS, Windows |
+| **Monoio + io_uring**     | `monoio` | Maximum throughput on Linux 6.1+; parity evidence pending | Linux 6.1+ only       |
 
 ### Choosing a Backend
 
@@ -66,6 +67,8 @@ use harrow::runtime::monoio::run;
 ```
 
 See [`examples/monoio_hello.rs`](harrow/examples/monoio_hello.rs) for a complete Monoio example.
+
+The custom H1 stack remains an important reference and performance path, but Harrow is also tracking a Hyper-based Tokio prototype to reduce protocol maintenance risk if performance is close enough. See [`docs/protocol-backend-strategy.md`](docs/protocol-backend-strategy.md).
 
 For advanced Monoio lifecycle control (`start`, `ServerHandle`, async `serve*`
 entrypoints), depend on `harrow-server-monoio` directly. The root `harrow`

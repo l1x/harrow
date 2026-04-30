@@ -5,7 +5,9 @@
 **Benchmark tools:** criterion 0.5; `spinr` + `harrow-bench` for remote perf runs
 
 > Product scope and backend support policy live in
-> [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md).
+> [docs/prds/harrow-1.0.md](./prds/harrow-1.0.md). The Hyper-vs-custom-H1
+> backend decision gate lives in
+> [docs/protocol-backend-strategy.md](./protocol-backend-strategy.md).
 > This file is the current benchmark workflow plus preserved historical notes.
 
 ---
@@ -14,6 +16,7 @@
 
 The important current conclusions are:
 
+- The current measurements describe the custom Tokio HTTP/1 backend, not the planned Hyper prototype.
 - Harrow Tokio is now near `ntex` on the hot `/text` path after the custom
   HTTP/1 rewrite and the `Content-Length` framing fix.
 - The remaining large measured gap is concentrated on larger JSON responses,
@@ -53,6 +56,18 @@ Evidence:
 
 So the current JSON work should be treated as **serialization optimization**,
 not another transport rewrite.
+
+## Next Benchmark Decision Gate
+
+Before the 1.0 backend support policy is finalized, add and measure a
+Tokio/Hyper backend with a thread-per-core/current-thread profile. The key
+question is whether Hyper-owned protocol handling plus Harrow's preferred worker
+topology is close enough to the custom H1 path to justify a much smaller stable
+protocol maintenance surface.
+
+The comparison should include current Harrow Tokio custom H1, the Hyper
+prototype, Monoio, Meguri if still relevant, Tako's thread-per-core Hyper
+reference, and existing external baselines.
 
 ## Current Benchmark Workflow
 

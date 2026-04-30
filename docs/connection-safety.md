@@ -1,14 +1,18 @@
 # Connection Safety and Timeout Architecture
 
-**Status:** current as of 2026-04-15
+**Status:** current for the custom H1 path as of 2026-04-15; strategy note updated 2026-04-30
+
 **Scope:** custom HTTP/1 backends on `feat/custom-http-backend`
 
 This document describes how Harrow protects itself from slow, idle, and
 malicious TCP clients at the transport layer.
 
-The important architectural point is that these controls now live in Harrow's
-own HTTP/1 connection loops, not in Hyper builder configuration. The relevant
-runtime shape is documented in
+For the custom H1 backends, these controls live in Harrow's own HTTP/1
+connection loops, not in Hyper builder configuration. Harrow is now also
+planning a Hyper-based Tokio prototype; that path should provide equivalent
+operator-facing controls while delegating protocol parsing/framing to Hyper. The
+tradeoff is tracked in [Protocol Backend Strategy](./protocol-backend-strategy.md).
+The relevant custom-backend runtime shape is documented in
 [`docs/old/strategy-local-workers.md`](./old/strategy-local-workers.md), and the
 dispatcher split is documented in
 [`docs/h1-dispatcher-design.md`](./h1-dispatcher-design.md).

@@ -9,6 +9,7 @@ line. The detailed product source of truth remains
 Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
 
 - stable HTTP/1.1 behavior on supported backends;
+- a clear Hyper-vs-custom-H1 backend decision based on measured performance and maintenance risk;
 - a clear backend support policy;
 - practical middleware and observability;
 - good lifecycle/deployment documentation;
@@ -19,10 +20,11 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
 | Area | Status |
 | --- | --- |
 | Core request/response/routing | Implemented |
-| Custom HTTP/1 codec and dispatcher shape | Implemented |
-| HTTP/2 backend support | 1.0 target; Monoio partial, Tokio/Meguri pending |
-| Tokio custom HTTP/1 backend | First-class, public |
-| Monoio HTTP/1 backend | First-class, public Linux backend |
+| Custom HTTP/1 codec and dispatcher shape | Implemented; now reference/experimental candidate pending hardening evidence |
+| Hyper-based Tokio backend | Planned prototype before final 1.0 backend commitment |
+| HTTP/2 backend support | 1.0 target; Hyper prototype may become preferred Tokio path; Monoio partial, custom Tokio/Meguri pending |
+| Tokio custom HTTP/1 backend | Public today; stable-by-default status under review because Harrow owns protocol correctness |
+| Monoio HTTP/1 backend | Public Linux backend; stable support depends on parity and protocol evidence |
 | Meguri direct io_uring backend | Experimental workspace backend |
 | Shared H1 lifecycle model | Implemented in `harrow-server` |
 | Lifecycle verification docs/model | Present, still narrow |
@@ -38,8 +40,10 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
    - Link current docs from `README.md` and `docs/index.md`.
 
 2. **Clarify and complete backend support**
-   - Tokio and Monoio are first-class.
-   - Meguri is experimental until it meets the same protocol/lifecycle bar.
+   - Prototype `harrow-server-tokio-hyper` before finalizing the stable 1.0 Tokio backend.
+   - Compare Hyper + thread-per-core against Harrow's custom H1 stack using the same app and benchmark harness.
+   - Keep the custom codec/dispatcher as a reference and advanced-performance candidate, but require hardening evidence before calling it production-stable.
+   - Meguri is experimental until it meets the same protocol/lifecycle/unsafe-code bar.
    - HTTP/2 support/parity is required before 1.0, or unsupported backends must be explicitly downgraded.
 
 3. **Document operations**
@@ -55,12 +59,14 @@ Ship Harrow 1.0 as a small, explicit, production-ready HTTP framework with:
    - add small, high-value production hardening features first.
 
 5. **Refresh performance evidence**
+   - add a Hyper + thread-per-core Tokio backend profile;
    - rerun runtime matrix on clean bench infrastructure;
    - update `docs/performance.md` only with trusted current measurements;
    - keep old benchmark archaeology in `docs/old/` or `docs/article.md`.
 
 ## Later / Research
 
+- Local/`!Send` per-worker app/router mode if the Hyper/thread-per-core prototype proves the topology valuable.
 - PROXY protocol support for L4 load balancer deployments.
 - SSE helper and realtime examples.
 - Auth middleware beyond the current core operational middleware.
